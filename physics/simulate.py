@@ -77,23 +77,27 @@ def reflect(vel: tuple[float, float], wall: str) -> tuple[float, float]:
 
 # --- ball-ball collisions ----------------------------------------------------------
 
-def resolve_collision(p1, v1, p2, v2):
+Vec = tuple[float, float]
+
+
+def resolve_collision(p1: Vec, v1: Vec, p2: Vec, v2: Vec) -> tuple[Vec, Vec]:
     """Collide two equal-mass balls with no spin and no throw.
 
     p1, p2 are the (x, y) centres and v1, v2 the (vx, vy) velocities. Along the line
     through the two centres the balls exchange momentum, scaled by params.E_BALL; the
     components across that line are kept. With E_BALL = 1 the components along the line
-    simply swap, which gives the 90° rule for cuts. Balls that are not closing are left
-    alone. Returns new (v1', v2') tuples.
+    simply swap, which gives the 90° rule for cuts. Balls that are not closing, or whose
+    centres coincide (no line to push along), are left alone. Returns new (v1', v2').
     """
+    unchanged = (v1[0], v1[1]), (v2[0], v2[1])
     dx, dy = p2[0] - p1[0], p2[1] - p1[1]
     dist = math.hypot(dx, dy)
-    if dist == 0:                       # no line of centres to push along
-        return (v1[0], v1[1]), (v2[0], v2[1])
+    if dist == 0:
+        return unchanged
     nx, ny = dx / dist, dy / dist
     closing = (v1[0] - v2[0]) * nx + (v1[1] - v2[1]) * ny
     if closing <= 0:
-        return (v1[0], v1[1]), (v2[0], v2[1])
+        return unchanged
     k = (1 + params.E_BALL) / 2 * closing
     return (v1[0] - k * nx, v1[1] - k * ny), (v2[0] + k * nx, v2[1] + k * ny)
 

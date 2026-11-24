@@ -8,8 +8,8 @@ Interface expected (physics/simulate.py):
         velocities are exchanged, scaled by params.E_BALL (read at call time):
             k = (1 + E_BALL) / 2 * closing_speed
         and the components across that line are kept. If the balls are not closing
-        (moving apart or level), the velocities come back unchanged. Returns new tuples
-        and does not mutate its inputs.
+        (moving apart or level), or their centres coincide, the velocities come back
+        unchanged. Returns new tuples and does not mutate its inputs.
 
 simulate() uses resolve_collision() for every ball-ball contact. Recorded paths come in
 issue #7, so the full-simulation tests below check final positions; to check "never
@@ -258,6 +258,13 @@ def test_balls_that_are_not_closing_are_left_alone(resolve, v1, v2):
     assert b == pytest.approx(v2)
 
 
+def test_coincident_centres_are_left_alone(resolve):
+    # No line of centres to push along; the simulator never gets here, but no crash.
+    a, b = resolve((1.0, 0.5), (2.0, 0.3), (1.0, 0.5), (-0.4, 0.0))
+    assert a == pytest.approx((2.0, 0.3))
+    assert b == pytest.approx((-0.4, 0.0))
+
+
 def test_resolve_reads_e_ball_at_call_time(resolve, params, monkeypatch):
     args = ((0.0, 0.0), (2.0, 0.0), (D, 0.0), (0.0, 0.0))
     monkeypatch.setattr(params, "E_BALL", 0.5)
@@ -403,8 +410,9 @@ def test_first_contact_ignores_balls_the_cue_touches_later(simulate, params, ela
     a = (contact[0] + D * a_dir[0], contact[1] + D * a_dir[1])
     b = (contact[0] + 0.3 * cue_dir[0], contact[1] + 0.3 * cue_dir[1])
     state = TableState([Ball(0, *CUE_START), Ball(12, *b), Ball(3, *a)])   # B listed first
-    # Arrive fast enough that the cue still reaches B after losing half its energy.
-    power = power_to_arrive(params, 1.2, CONTACT_X - CUE_START[0])
+    # The cue keeps sin 45° of its speed, so arriving at 0.6 m/s still reaches B but
+    # nothing rolls far enough to rattle around the table.
+    power = power_to_arrive(params, 0.6, CONTACT_X - CUE_START[0])
     result = simulate(state, Shot(0.0, power))
     assert result.first_contact == 3
     assert live_positions(result)[12] != pytest.approx(b, abs=0.01)     # B was hit
@@ -417,8 +425,11 @@ def chain_table() -> TableState:
     return TableState([Ball(0, 0.5, MID_Y), Ball(5, 1.0, MID_Y), Ball(13, 1.5, MID_Y)])
 
 
-def test_chain_moves_b_and_first_contact_is_a(simulate):
-    result = simulate(chain_table(), Shot(0.0, 0.3))
+def test_chain_moves_b_and_first_contact_is_a(simulate, params):
+    # Default E_BALL. Soft enough that B stops long before a cushion, so B can only
+    # have moved because A hit it.
+    power = power_to_arrive(params, 0.5, (1.0 - D) - 0.5)
+    result = simulate(chain_table(), Shot(0.0, power))
     assert result.first_contact == 5
     assert live_positions(result)[13][0] > 1.5 + 0.01
     assert_no_overlap(result)
