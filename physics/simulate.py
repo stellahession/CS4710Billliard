@@ -1,0 +1,202 @@
+"""The physics simulator: simulate(state, shot, record_paths=False) -> ShotResult.
+
+There is no spin, so between events every ball moves in a straight line with constant
+deceleration. Each loop we:
+  1. resolve any contacts (ball-ball or ball-cushion) that are touching and closing,
+  2. take the largest step that can't skip a contact or a ball stopping (_safe_step),
+  3. move every ball exactly along its line for that step (_advance).
+This is "conservative advancement", chosen in issue #1.
+
+Not modelled yet: pockets and scratches (issue #6) and recorded paths (issue #7), so
+`pocketed` is always [], `scratch` is False and `paths` is None for now.
+
+Constants are read from physics.params at call time so tests can monkeypatch them.
+"""
+from __future__ import annotations
+
+import math
+
+from core.state import BALL_R, TABLE_H, TABLE_W, Ball, Shot, ShotResult, TableState
+from physics import params
+
+D = 2 * BALL_R                               # centre distance when two balls touch
+X_MIN, X_MAX = BALL_R, TABLE_W - BALL_R      # where a ball centre touches a cushion
+Y_MIN, Y_MAX = BALL_R, TABLE_H - BALL_R
+CONTACT_TOL = 1e-5      # m, a gap smaller than this counts as touching
+MAX_STEPS = 100_000     # backstop in case steps get tiny and MAX_TIME is never reached
+NUDGE_ROUNDS = 100      # passes used to push overlapping input balls apart
+NUDGE_MARGIN = 1e-9     # m, extra push so float rounding can't leave a pair overlapping
+
+
+def simulate(state: TableState, shot: Shot, record_paths: bool = False) -> ShotResult:
+    """Play `shot` on `state` until every ball stops. Never mutates its inputs."""
+    cue = next((b for b in state.balls if b.id == 0), None)
+    if cue is None:
+        raise ValueError("simulate() needs a cue ball (id 0) in state.balls")
+    if cue.pocketed:
+        raise ValueError("simulate() can't shoot: the cue ball (id 0) is already pocketed")
+
+    # Balls already pocketed in the input take no part in the shot.
+    live = [b for b in state.balls if not b.pocketed]
+    ids = [b.id for b in live]
+    positions = _tidy_positions([(b.x, b.y) for b in live])
+
+    power = min(max(shot.power, 0.0), 1.0)
+    v = power * params.V_MAX
+    vx, vy = v * math.cos(shot.angle), v * math.sin(shot.angle)
+    balls = [(x, y, vx, vy) if bid == 0 else (x, y, 0.0, 0.0)
+             for bid, (x, y) in zip(ids, positions)]
+
+    first_contact = _run(balls, ids)
+
+    final = {bid: (x, y) for bid, (x, y, _, _) in zip(ids, balls)}
+    out = [Ball(b.id, *final[b.id]) if b.id in final else Ball(b.id, b.x, b.y, True)
+           for b in state.balls]
+    return ShotResult(final=TableState(out, state.group), pocketed=[],
+                      first_contact=first_contact, scratch=False, paths=None)
+
+
+# --- input clean-up ----------------------------------------------------------------
+
+def _clamp_inside(x: float, y: float) -> tuple[float, float]:
+    return min(max(x, X_MIN), X_MAX), min(max(y, Y_MIN), Y_MAX)
+
+
+def _tidy_positions(positions):
+    """Pull balls inside the cushions and push overlapping balls apart.
+
+    Vision output can be slightly off, so this fixes small errors on a copy. Each pass
+    moves both balls of an overlapping pair half the overlap apart along the line
+    between their centres (along +x if the centres coincide), then clamps again.
+    """
+    pos = [_clamp_inside(x, y) for x, y in positions]
+    n = len(pos)
+    for _ in range(NUDGE_ROUNDS):
+        moved = False
+        for i in range(n):
+            for j in range(i + 1, n):
+                (xi, yi), (xj, yj) = pos[i], pos[j]
+                dx, dy = xj - xi, yj - yi
+                dist = math.hypot(dx, dy)
+                if dist >= D:
+                    continue
+                nx, ny = (dx / dist, dy / dist) if dist > 1e-12 else (1.0, 0.0)
+                push = (D - dist) / 2 + NUDGE_MARGIN
+                pos[i] = _clamp_inside(xi - nx * push, yi - ny * push)
+                pos[j] = _clamp_inside(xj + nx * push, yj + ny * push)
+                moved = True
+        if not moved:
+            break
+    return pos
+
+
+# --- stepping ----------------------------------------------------------------------
+
+def _run(balls, ids):
+    """Move balls (list of (x, y, vx, vy), mutated in place) until all stop.
+
+    Returns first_contact: the id of the first ball the cue ball touches, or None.
+    """
+    decel, v_stop = params.DECEL, params.V_STOP
+    e_ball, e_cushion, max_time = params.E_BALL, params.E_CUSHION, params.MAX_TIME
+
+    first_contact = None
+    t = 0.0
+    for _ in range(MAX_STEPS):
+        first_contact = _resolve_contacts(balls, ids, first_contact, e_ball, e_cushion)
+        dt = _safe_step(balls, decel, v_stop)
+        if dt == math.inf:                  # nothing is moving
+            return first_contact
+        t += dt
+        if t > max_time:
+            raise RuntimeError(f"simulate() did not settle within MAX_TIME={max_time} s")
+        _advance(balls, dt, decel, v_stop)
+    raise RuntimeError(f"simulate() did not settle within {MAX_STEPS} steps")
+
+
+def _safe_step(balls, decel, v_stop) -> float:
+    """Largest dt that can't skip a contact or a ball stopping.
+
+    Speeds only decrease, so the current speeds are an upper bound for the whole step.
+    """
+    speeds = [math.hypot(vx, vy) for _, _, vx, vy in balls]
+    dt = math.inf
+    for i, (x, y, vx, vy) in enumerate(balls):
+        s = speeds[i]
+        if s <= v_stop:
+            continue
+        dt = min(dt, s / decel)                          # don't step past it stopping
+        if vx > 0:                                       # cushions
+            dt = min(dt, max(X_MAX - x, 0) / vx)
+        elif vx < 0:
+            dt = min(dt, max(x - X_MIN, 0) / -vx)
+        if vy > 0:
+            dt = min(dt, max(Y_MAX - y, 0) / vy)
+        elif vy < 0:
+            dt = min(dt, max(y - Y_MIN, 0) / -vy)
+    for i in range(len(balls)):
+        xi, yi, vxi, vyi = balls[i]
+        for j in range(i + 1, len(balls)):
+            combined = speeds[i] + speeds[j]
+            if combined <= v_stop:
+                continue
+            xj, yj, vxj, vyj = balls[j]
+            dx, dy = xj - xi, yj - yi
+            gap = math.hypot(dx, dy) - D
+            if gap <= CONTACT_TOL and (vxi - vxj) * dx + (vyi - vyj) * dy <= 0:
+                continue                                 # touching but separating
+            dt = min(dt, max(gap, 0) / combined)
+    return dt
+
+
+def _resolve_contacts(balls, ids, first_contact, e_ball, e_cushion):
+    """Bounce touching, closing pairs and cushion hits. Mutates balls."""
+    n = len(balls)
+    for _ in range(4 * n + 4):          # repeat for chains like a frozen rack
+        changed = False
+        for i in range(n):
+            x, y, vx, vy = balls[i]
+            if (x <= X_MIN + CONTACT_TOL and vx < 0) or (x >= X_MAX - CONTACT_TOL and vx > 0):
+                vx, changed = -e_cushion * vx, True
+            if (y <= Y_MIN + CONTACT_TOL and vy < 0) or (y >= Y_MAX - CONTACT_TOL and vy > 0):
+                vy, changed = -e_cushion * vy, True
+            balls[i] = (x, y, vx, vy)
+        for i in range(n):
+            for j in range(i + 1, n):
+                xi, yi, vxi, vyi = balls[i]
+                xj, yj, vxj, vyj = balls[j]
+                dx, dy = xj - xi, yj - yi
+                dist = math.hypot(dx, dy)
+                if dist - D > CONTACT_TOL:
+                    continue
+                nx, ny = dx / dist, dy / dist
+                closing = (vxi - vxj) * nx + (vyi - vyj) * ny
+                if closing <= 0:
+                    continue
+                # Equal masses, no spin: exchange momentum along the line of centres.
+                # With E_BALL = 1 this swaps the normal components exactly.
+                k = (1 + e_ball) / 2 * closing
+                balls[i] = (xi, yi, vxi - k * nx, vyi - k * ny)
+                balls[j] = (xj, yj, vxj + k * nx, vyj + k * ny)
+                changed = True
+                if first_contact is None and 0 in (ids[i], ids[j]):
+                    first_contact = ids[j] if ids[i] == 0 else ids[i]
+        if not changed:
+            break
+    return first_contact
+
+
+def _advance(balls, dt, decel, v_stop):
+    """Move every ball exactly along its line for dt with constant deceleration."""
+    for i, (x, y, vx, vy) in enumerate(balls):
+        s = math.hypot(vx, vy)
+        if s <= v_stop:                 # at rest: clear any leftover crawl speed
+            balls[i] = (x, y, 0.0, 0.0)
+            continue
+        new_s = s - decel * dt
+        dist = s * dt - 0.5 * decel * dt * dt
+        ux, uy = vx / s, vy / s
+        if new_s <= v_stop:
+            balls[i] = (x + ux * dist, y + uy * dist, 0.0, 0.0)
+        else:
+            balls[i] = (x + ux * dist, y + uy * dist, ux * new_s, uy * new_s)
