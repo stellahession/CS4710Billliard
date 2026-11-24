@@ -132,6 +132,8 @@ def run(state: TableState, shot: Shot):
         if dt == math.inf:              # nothing is moving
             break
         _advance(balls, dt)
+    else:
+        raise RuntimeError(f"run() did not settle within {MAX_STEPS} steps")
 
     final = {bid: (x, y) for bid, (x, y, _, _) in zip(ids, balls)}
     out = [Ball(b.id, *final[b.id], False) if b.id in final

@@ -55,19 +55,6 @@ def ball(state: TableState, bid: int) -> Ball:
     return next(b for b in state.balls if b.id == bid)
 
 
-def break_table() -> TableState:
-    """Cue ball on the head string and a tight 15-ball rack around the foot spot."""
-    balls = [Ball(0, TABLE_W / 4, TABLE_H / 2)]
-    ids = iter([1, 9, 2, 10, 8, 3, 11, 4, 12, 5, 13, 6, 14, 7, 15])
-    apex_x = 3 * TABLE_W / 4
-    for row in range(5):
-        for k in range(row + 1):
-            x = apex_x + row * 2 * BALL_R * math.sqrt(3) / 2 + 1e-4 * row
-            y = TABLE_H / 2 + (k - row / 2) * (2 * BALL_R + 1e-4)
-            balls.append(Ball(next(ids), x, y))
-    return TableState(balls)
-
-
 def assert_no_overlap(state: TableState, tol: float = 1e-3):
     live = [b for b in state.balls if not b.pocketed]
     for i, a in enumerate(live):
@@ -181,7 +168,7 @@ def test_balls_never_end_up_overlapping(proto, deg):
 
 
 def test_full_power_break_finishes_without_overlaps(proto):
-    final, first = proto.run(break_table(), Shot(0.0, 1.0))
+    final, first = proto.run(proto.break_table(), Shot(0.0, 1.0))
     assert first == 1
     assert_no_overlap(final)
 
@@ -195,3 +182,10 @@ def test_time_shots_reports_mean_p95_max(proto):
     assert stats["n"] == len(shots)
     assert 0 < stats["mean_ms"] <= stats["max_ms"]
     assert 0 < stats["p95_ms"] <= stats["max_ms"]
+
+
+def test_run_raises_if_it_hits_the_step_cap(proto, monkeypatch):
+    # Hitting MAX_STEPS must be loud, not a silent mid-motion result.
+    monkeypatch.setattr(proto, "MAX_STEPS", 3)
+    with pytest.raises(RuntimeError):
+        proto.run(proto.break_table(), Shot(0.0, 1.0))
