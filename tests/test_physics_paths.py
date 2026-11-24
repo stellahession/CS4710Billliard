@@ -56,6 +56,15 @@ def params():
 
 
 @pytest.fixture
+def pre_tuning_params(params, monkeypatch):
+    # These shots were sized for the speed, friction and cushions used before issue #10,
+    # so a low-power shot still reaches its target. They check mechanics, not the feel.
+    monkeypatch.setattr(params, "V_MAX", 6.0)
+    monkeypatch.setattr(params, "DECEL", 0.15)
+    monkeypatch.setattr(params, "E_CUSHION", 0.8)
+
+
+@pytest.fixture
 def elastic(params, monkeypatch):
     monkeypatch.setattr(params, "E_BALL", 1.0)
 
@@ -163,7 +172,7 @@ def test_miss_has_only_a_cue_path(simulate):
     assert set(result.paths) == {0}
 
 
-def test_ball_that_is_never_hit_has_no_path(simulate, params):
+def test_ball_that_is_never_hit_has_no_path(simulate, params, pre_tuning_params):
     power = power_to_arrive(params, 0.5, (1.0 - D) - 0.5)
     result = simulate(chain_table(), Shot(0.0, power), record_paths=True)
     assert set(result.paths) == {0, 5, 13}
@@ -434,7 +443,8 @@ def test_inelastic_straight_hit_cue_keeps_going_forward_after_contact(simulate, 
         pytest.approx(0.0, abs=ANGLE_TOL)
 
 
-def test_chain_middle_ball_path_includes_its_hit_on_the_last_ball(simulate, params):
+def test_chain_middle_ball_path_includes_its_hit_on_the_last_ball(simulate, params,
+                                                                  pre_tuning_params):
     power = power_to_arrive(params, 0.5, (1.0 - D) - 0.5)
     result = simulate(chain_table(), Shot(0.0, power), record_paths=True)
     assert result.paths[0][1] == pytest.approx((1.0 - D, MID_Y), abs=EVENT_TOL)

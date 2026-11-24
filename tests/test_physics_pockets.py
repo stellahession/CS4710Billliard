@@ -44,6 +44,15 @@ def params():
 
 
 @pytest.fixture
+def pre_tuning_params(params, monkeypatch):
+    # These shots were sized for the speed, friction and cushions used before issue #10,
+    # so a low-power shot still reaches its target. They check mechanics, not the feel.
+    monkeypatch.setattr(params, "V_MAX", 6.0)
+    monkeypatch.setattr(params, "DECEL", 0.15)
+    monkeypatch.setattr(params, "E_CUSHION", 0.8)
+
+
+@pytest.fixture
 def elastic(params, monkeypatch):
     monkeypatch.setattr(params, "E_BALL", 1.0)
 
@@ -141,7 +150,8 @@ def test_object_ball_sent_straight_at_each_pocket_is_captured(simulate, params, 
 @pytest.mark.parametrize("k", range(6))
 @pytest.mark.parametrize("power", POWERS)
 def test_lone_cue_sent_straight_at_each_pocket_is_captured_at_any_power(simulate, params,
-                                                                        k, power):
+                                                                        k, power,
+                                                                        pre_tuning_params):
     # Fast balls take long steps; they still must not skip over the capture circle.
     u = into_pocket(k)
     start = back_from(POCKETS[k], u, 0.5)
@@ -168,7 +178,8 @@ def test_corner_along_the_rail_object_ball_is_captured(simulate, params, k, rail
 @pytest.mark.parametrize("k", CORNERS)
 @pytest.mark.parametrize("rail", ["horizontal", "vertical"])
 @pytest.mark.parametrize("power", POWERS)
-def test_corner_along_the_rail_lone_cue_is_captured_at_any_power(simulate, k, rail, power):
+def test_corner_along_the_rail_lone_cue_is_captured_at_any_power(simulate, k, rail, power,
+                                                                 pre_tuning_params):
     _, start, u = along_rail_into_corner(k, rail)
     result = simulate(TableState([Ball(0, *start)]), Shot(aim(u), power))
     assert result.pocketed == [0]
@@ -198,7 +209,7 @@ def test_side_straight_in_object_ball_is_captured(simulate, params, k, off_deg):
 
 @pytest.mark.parametrize("k", SIDES)
 @pytest.mark.parametrize("power", POWERS)
-def test_side_straight_in_from_the_table_centre(simulate, params, k, power):
+def test_side_straight_in_from_the_table_centre(simulate, params, k, power, pre_tuning_params):
     if power * params.V_MAX < speed_to_roll(params, MID_Y):
         pytest.skip("too soft to reach the pocket with these params")
     u = into_pocket(k)
@@ -222,7 +233,8 @@ def test_side_along_the_rail_object_ball_is_captured(simulate, params, k, sx):
 
 @pytest.mark.parametrize("k", SIDES)
 @pytest.mark.parametrize("power", POWERS)
-def test_side_along_the_rail_lone_cue_is_captured_at_any_power(simulate, k, power):
+def test_side_along_the_rail_lone_cue_is_captured_at_any_power(simulate, k, power,
+                                                               pre_tuning_params):
     # The only thing ahead on the rail is the far cushion, so a step can be long.
     y = TABLE_H - BALL_R if POCKETS[k][1] else BALL_R
     result = simulate(TableState([Ball(0, 0.4, y)]), Shot(0.0, power))

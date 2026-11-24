@@ -28,7 +28,9 @@ CREEP_MAX = 0.02        # m, the cue may travel less than this after a head-on h
 LINE_TOL = 1.0          # degrees, how far off the original line the object ball may go
 SPLIT_TOL = 5.0         # degrees, around 90° for the cut split
 EVENT_TOL = 1e-4        # m, same as issue #7
-MODERATE = [0.3, 0.4, 0.5]
+# Dr. Dave's "medium" speed is 2-4 mph (drdavepoolinfo.com/?p=2486). With V_MAX = 8.94 m/s
+# (20 mph) from issue #10, that is power 0.1 to 0.2.
+MODERATE = [0.1, 0.15, 0.2]
 
 
 @pytest.fixture

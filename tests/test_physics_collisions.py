@@ -52,6 +52,15 @@ def params():
 
 
 @pytest.fixture
+def pre_tuning_params(params, monkeypatch):
+    # These shots were sized for the speed, friction and cushions used before issue #10,
+    # so a low-power shot still reaches its target. They check mechanics, not the feel.
+    monkeypatch.setattr(params, "V_MAX", 6.0)
+    monkeypatch.setattr(params, "DECEL", 0.15)
+    monkeypatch.setattr(params, "E_CUSHION", 0.8)
+
+
+@pytest.fixture
 def elastic(params, monkeypatch):
     monkeypatch.setattr(params, "E_BALL", 1.0)
 
@@ -300,7 +309,8 @@ def cut_table(deg: float) -> TableState:
     return TableState([Ball(0, *CUE_START), Ball(1, CONTACT_X + D * nx, MID_Y + D * ny)])
 
 
-def test_full_sim_head_on_elastic_cue_stops_at_contact(simulate, params, elastic):
+def test_full_sim_head_on_elastic_cue_stops_at_contact(simulate, params, elastic,
+                                                       pre_tuning_params):
     arrive = 0.6
     power = power_to_arrive(params, arrive, CONTACT_X - CUE_START[0])
     result = simulate(cut_table(0), Shot(0.0, power))
@@ -312,7 +322,8 @@ def test_full_sim_head_on_elastic_cue_stops_at_contact(simulate, params, elastic
 
 
 @pytest.mark.parametrize("deg", [15, 30, 60, -30])
-def test_full_sim_object_ball_ends_on_the_line_of_centres(simulate, params, deg):
+def test_full_sim_object_ball_ends_on_the_line_of_centres(simulate, params, deg,
+                                                          pre_tuning_params):
     # Default E_BALL: the object ball direction doesn't depend on restitution.
     power = power_to_arrive(params, 0.5, CONTACT_X - CUE_START[0])
     state = cut_table(deg)
@@ -359,7 +370,8 @@ def test_full_sim_cue_frozen_and_shot_into_it_moves_it(simulate):
     assert live_positions(result)[1][0] > 1.0 + D + 0.01
 
 
-def test_full_sim_frozen_line_passes_the_hit_to_the_last_ball(simulate, elastic):
+def test_full_sim_frozen_line_passes_the_hit_to_the_last_ball(simulate, elastic,
+                                                              pre_tuning_params):
     # Newton's cradle: cue, A, B all touching in a line. Only B should roll away.
     state = TableState([Ball(0, 1.0, MID_Y), Ball(1, 1.0 + D, MID_Y),
                         Ball(2, 1.0 + 2 * D, MID_Y)])
@@ -395,7 +407,7 @@ def test_first_contact_is_none_when_nothing_is_touched(simulate):
     assert result.first_contact is None
 
 
-def test_first_contact_after_a_cushion(simulate, no_pockets):
+def test_first_contact_after_a_cushion(simulate, no_pockets, pre_tuning_params):
     # Cue goes down into the bottom cushion, comes straight back up and hits ball 4.
     state = TableState([Ball(0, 1.0, 0.3), Ball(4, 1.0, 0.8), Ball(11, 2.2, 0.3)])
     result = simulate(state, Shot(-math.pi / 2, 0.13))    # one bounce, then a soft hit
@@ -403,7 +415,8 @@ def test_first_contact_after_a_cushion(simulate, no_pockets):
     assert live_positions(result)[4][1] > 0.8 + 0.01
 
 
-def test_first_contact_ignores_balls_the_cue_touches_later(simulate, params, elastic):
+def test_first_contact_ignores_balls_the_cue_touches_later(simulate, params, elastic,
+                                                           pre_tuning_params):
     # Elastic 45° cut on A at CONTACT_X: the cue then leaves at -45° and runs into B.
     a_dir, cue_dir = unit(45), unit(-45)
     contact = (CONTACT_X, MID_Y)
@@ -425,7 +438,7 @@ def chain_table() -> TableState:
     return TableState([Ball(0, 0.5, MID_Y), Ball(5, 1.0, MID_Y), Ball(13, 1.5, MID_Y)])
 
 
-def test_chain_moves_b_and_first_contact_is_a(simulate, params):
+def test_chain_moves_b_and_first_contact_is_a(simulate, params, pre_tuning_params):
     # Default E_BALL. Soft enough that B stops long before a cushion, so B can only
     # have moved because A hit it.
     power = power_to_arrive(params, 0.5, (1.0 - D) - 0.5)
@@ -435,7 +448,8 @@ def test_chain_moves_b_and_first_contact_is_a(simulate, params):
     assert_no_overlap(result)
 
 
-def test_elastic_chain_stops_each_ball_where_it_hits_the_next(simulate, params, elastic):
+def test_elastic_chain_stops_each_ball_where_it_hits_the_next(simulate, params, elastic,
+                                                              pre_tuning_params):
     arrive = 0.5          # speed the cue reaches A with; A and B keep it (no losses but rolling)
     power = power_to_arrive(params, arrive, (1.0 - D) - 0.5)
     result = simulate(chain_table(), Shot(0.0, power))

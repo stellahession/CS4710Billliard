@@ -202,8 +202,9 @@ def test_smaller_dt_gives_more_frames(simulate_timeline):
 
 def test_last_frame_time_is_how_long_the_shot_lasts(simulate_timeline, params):
     # A lone ball at speed v with constant deceleration stops after v / DECEL seconds.
-    # 0.1 power rolls about 1.2 m, so from the table centre it never reaches a cushion.
-    shot = Shot(0.0, 0.1)
+    # The power is chosen so it rolls 1.2 m, so from the table centre it never reaches a
+    # cushion whatever the tuned params are.
+    shot = Shot(0.0, math.sqrt(2 * params.DECEL * 1.2) / params.V_MAX)
     _, frames = simulate_timeline(TableState([Ball(0, TABLE_W / 2 - 0.6, MID_Y)]), shot)
     stop = shot.power * params.V_MAX / params.DECEL
     assert frames[-1][0] == pytest.approx(stop, rel=1e-3)
