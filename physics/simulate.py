@@ -21,6 +21,11 @@ spin a ball moves in a straight line between events, so we only need the start, 
 each time a contact changes its velocity (cushion bounce or ball-ball hit), and the end
 (the pocket's coordinates if it dropped). Only balls that moved get a path.
 
+Timeline (issue #9): simulate_timeline() is a dev-only helper for physics.demo. It runs
+the same shot, keeps a copy of the balls at the start of every step, and samples ball
+positions at fixed times by moving each ball along its line from the step before. The
+agent never calls it, and simulate() only pays one `is None` check per step for it.
+
 Constants are read from physics.params at call time so tests can monkeypatch them.
 """
 from __future__ import annotations
@@ -42,6 +47,53 @@ PATH_MIN_GAP = 1e-9     # m, a path point this close to the previous one is not 
 
 def simulate(state: TableState, shot: Shot, record_paths: bool = False) -> ShotResult:
     """Play `shot` on `state` until every ball stops. Never mutates its inputs."""
+    return _simulate(state, shot, record_paths)
+
+
+def simulate_timeline(state: TableState, shot: Shot, dt: float = 1 / 30):
+    """Play `shot` like simulate(..., record_paths=True) and sample it over time.
+
+    Returns (result, frames). frames is a list of (t, {ball id: (x, y)}) at
+    t = 0, dt, 2*dt, ... plus one last frame when every ball has stopped. Each frame
+    lists only the balls on the table at time t, so a pocketed ball disappears once it
+    drops. Used by physics.demo to animate a shot; not part of the shared interface.
+    """
+    if not dt > 0:
+        raise ValueError(f"simulate_timeline() needs dt > 0, got {dt}")
+    steps = []                          # (t, ids, balls) at the start of every step
+    result = _simulate(state, shot, True, steps)
+    end = steps[-1][0]
+    decel, v_stop = params.DECEL, params.V_STOP
+
+    frames = []
+    k = 0
+    n = 0
+    while n * dt < end - 1e-12:
+        t = n * dt
+        while k + 1 < len(steps) and steps[k + 1][0] <= t:
+            k += 1
+        t0, ids, balls = steps[k]
+        frames.append((float(t), {bid: _position_after(b, t - t0, decel, v_stop)
+                                  for bid, b in zip(ids, balls)}))
+        n += 1
+    final = {b.id: (float(b.x), float(b.y)) for b in result.final.balls if not b.pocketed}
+    frames.append((float(end), final))
+    return result, frames
+
+
+def _position_after(ball, tau, decel, v_stop):
+    """Where a ball (x, y, vx, vy) is after tau seconds of rolling in a straight line."""
+    x, y, vx, vy = ball
+    s = math.hypot(vx, vy)
+    if s <= v_stop:
+        return float(x), float(y)
+    tau = min(tau, s / decel)
+    dist = s * tau - 0.5 * decel * tau * tau
+    return float(x + vx / s * dist), float(y + vy / s * dist)
+
+
+def _simulate(state, shot, record_paths, steps=None):
+    """simulate(), plus an optional `steps` list that _run fills for simulate_timeline."""
     cue = next((b for b in state.balls if b.id == 0), None)
     if cue is None:
         raise ValueError("simulate() needs a cue ball (id 0) in state.balls")
@@ -66,7 +118,7 @@ def simulate(state: TableState, shot: Shot, record_paths: bool = False) -> ShotR
         paths = {b.id: [(b.x, b.y)] for b in live}
         for bid, (x, y) in zip(ids, positions):
             _add_point(paths[bid], x, y)
-    first_contact = _run(balls, ids, sunk, paths)
+    first_contact = _run(balls, ids, sunk, paths, steps)
 
     on_table = {bid: (x, y) for bid, (x, y, _, _) in zip(ids, balls)}
     in_pocket = dict(sunk)
@@ -235,11 +287,13 @@ def _tidy_positions(positions):
 
 # --- stepping ----------------------------------------------------------------------
 
-def _run(balls, ids, sunk, paths=None):
+def _run(balls, ids, sunk, paths=None, steps=None):
     """Move balls (list of (x, y, vx, vy), mutated in place) until all stop.
 
     Pocketed balls are removed from balls and ids and appended to sunk as (id, pocket).
     If paths is a dict {id: [points]}, each contact point is appended to it.
+    If steps is a list, (t, ids, balls) is appended to it at the start of every step,
+    after contacts are resolved, with copies of ids and balls.
     Returns first_contact: the id of the first ball the cue ball touches, or None.
     """
     decel, v_stop, pocket_r = params.DECEL, params.V_STOP, params.POCKET_R
@@ -249,6 +303,8 @@ def _run(balls, ids, sunk, paths=None):
     t = 0.0
     for _ in range(MAX_STEPS):
         first_contact = _resolve_contacts(balls, ids, sunk, first_contact, v_stop, paths)
+        if steps is not None:
+            steps.append((t, list(ids), list(balls)))
         dt = _safe_step(balls, decel, v_stop, pocket_r)
         if dt == math.inf:                  # nothing is moving
             return first_contact
