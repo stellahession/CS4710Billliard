@@ -16,7 +16,10 @@ mouth drops instead of bouncing off the rail. A dropped ball is removed from pla
 once. Only moving balls are checked, so a ball resting near a pocket stays until hit.
 Physics never re-spots the cue ball after a scratch; the agent or app does that.
 
-Not modelled yet: recorded paths (issue #7), so `paths` is None for now.
+Paths (issue #7): with record_paths=True, each ball's path is its event points. With no
+spin a ball moves in a straight line between events, so we only need the start, a point
+each time a contact changes its velocity (cushion bounce or ball-ball hit), and the end
+(the pocket's coordinates if it dropped). Only balls that moved get a path.
 
 Constants are read from physics.params at call time so tests can monkeypatch them.
 """
@@ -34,6 +37,7 @@ CONTACT_TOL = 1e-5      # m, a gap smaller than this counts as touching
 MAX_STEPS = 100_000     # backstop in case steps get tiny and MAX_TIME is never reached
 NUDGE_ROUNDS = 100      # passes used to push overlapping input balls apart
 NUDGE_MARGIN = 1e-9     # m, extra push so float rounding can't leave a pair overlapping
+PATH_MIN_GAP = 1e-9     # m, a path point this close to the previous one is not added
 
 
 def simulate(state: TableState, shot: Shot, record_paths: bool = False) -> ShotResult:
@@ -56,7 +60,13 @@ def simulate(state: TableState, shot: Shot, record_paths: bool = False) -> ShotR
              for bid, (x, y) in zip(ids, positions)]
 
     sunk = []                           # (ball id, pocket index), in the order they dropped
-    first_contact = _run(balls, ids, sunk)
+    # Each path starts at the input position; if clean-up moved the ball, that's a point too.
+    paths = None
+    if record_paths:
+        paths = {b.id: [(b.x, b.y)] for b in live}
+        for bid, (x, y) in zip(ids, positions):
+            _add_point(paths[bid], x, y)
+    first_contact = _run(balls, ids, sunk, paths)
 
     on_table = {bid: (x, y) for bid, (x, y, _, _) in zip(ids, balls)}
     in_pocket = dict(sunk)
@@ -69,8 +79,35 @@ def simulate(state: TableState, shot: Shot, record_paths: bool = False) -> ShotR
         else:                           # already pocketed in the input
             out.append(Ball(b.id, b.x, b.y, pocketed=True))
     pocketed = [bid for bid, _ in sunk]
+    if paths is not None:
+        paths = _finish_paths(paths, state.balls, out)
     return ShotResult(final=TableState(out, state.group), pocketed=pocketed,
-                      first_contact=first_contact, scratch=0 in pocketed, paths=None)
+                      first_contact=first_contact, scratch=0 in pocketed, paths=paths)
+
+
+# --- paths -------------------------------------------------------------------------
+
+def _add_point(path, x, y):
+    """Append (x, y) unless it is the point already at the end of the path."""
+    lx, ly = path[-1]
+    if math.hypot(x - lx, y - ly) > PATH_MIN_GAP:
+        path.append((x, y))
+
+
+def _finish_paths(paths, inputs, finals):
+    """Add each ball's end point and keep only the balls that moved."""
+    done = {}
+    for b_in, b_out in zip(inputs, finals):
+        if b_in.id not in paths or (b_in.x, b_in.y) == (b_out.x, b_out.y):
+            continue
+        path = paths[b_in.id]
+        # The pocket's coordinates if it dropped. POCKETS mixes ints and floats, so convert.
+        end = (float(b_out.x), float(b_out.y))
+        _add_point(path, *end)
+        if len(path) > 1:
+            path[-1] = end              # an end right on the last event replaces it exactly
+        done[b_in.id] = path
+    return done
 
 
 # --- cushions ----------------------------------------------------------------------
@@ -198,10 +235,11 @@ def _tidy_positions(positions):
 
 # --- stepping ----------------------------------------------------------------------
 
-def _run(balls, ids, sunk):
+def _run(balls, ids, sunk, paths=None):
     """Move balls (list of (x, y, vx, vy), mutated in place) until all stop.
 
     Pocketed balls are removed from balls and ids and appended to sunk as (id, pocket).
+    If paths is a dict {id: [points]}, each contact point is appended to it.
     Returns first_contact: the id of the first ball the cue ball touches, or None.
     """
     decel, v_stop, pocket_r = params.DECEL, params.V_STOP, params.POCKET_R
@@ -210,7 +248,7 @@ def _run(balls, ids, sunk):
     first_contact = None
     t = 0.0
     for _ in range(MAX_STEPS):
-        first_contact = _resolve_contacts(balls, ids, sunk, first_contact, v_stop)
+        first_contact = _resolve_contacts(balls, ids, sunk, first_contact, v_stop, paths)
         dt = _safe_step(balls, decel, v_stop, pocket_r)
         if dt == math.inf:                  # nothing is moving
             return first_contact
@@ -259,11 +297,12 @@ def _safe_step(balls, decel, v_stop, pocket_r) -> float:
     return dt
 
 
-def _resolve_contacts(balls, ids, sunk, first_contact, v_stop):
+def _resolve_contacts(balls, ids, sunk, first_contact, v_stop, paths=None):
     """Drop balls into pockets, then bounce cushion hits and touching, closing pairs.
 
     Pockets are checked at the start of every round, so a ball that was just hit at a
-    pocket mouth drops before it can bounce off the rail. Mutates balls, ids and sunk.
+    pocket mouth drops before it can bounce off the rail. Mutates balls, ids and sunk,
+    and adds each ball whose velocity changes to paths (if given) at its current point.
     """
     for _ in range(4 * len(balls) + 4):     # repeat for chains like a frozen rack
         _drop_pocketed(balls, ids, sunk, v_stop)
@@ -271,10 +310,15 @@ def _resolve_contacts(balls, ids, sunk, first_contact, v_stop):
         changed = False
         for i in range(n):
             x, y, vx, vy = balls[i]
-            for wall in _walls_hit(x, y, vx, vy):
+            walls = _walls_hit(x, y, vx, vy)
+            if not walls:
+                continue
+            for wall in walls:
                 vx, vy = reflect((vx, vy), wall)
-                changed = True
             balls[i] = (x, y, vx, vy)
+            changed = True
+            if paths is not None:
+                _add_point(paths[ids[i]], x, y)
         for i in range(n):
             for j in range(i + 1, n):
                 xi, yi, vxi, vyi = balls[i]
@@ -287,6 +331,9 @@ def _resolve_contacts(balls, ids, sunk, first_contact, v_stop):
                 balls[i] = (xi, yi, *vi)
                 balls[j] = (xj, yj, *vj)
                 changed = True
+                if paths is not None:
+                    _add_point(paths[ids[i]], xi, yi)
+                    _add_point(paths[ids[j]], xj, yj)
                 if first_contact is None and 0 in (ids[i], ids[j]):
                     first_contact = ids[j] if ids[i] == 0 else ids[i]
         if not changed:
