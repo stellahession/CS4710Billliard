@@ -2,15 +2,21 @@
 
 There is no spin, so between events every ball moves in a straight line with constant
 deceleration. Each loop we:
-  1. resolve any contacts (ball-ball or ball-cushion) that are touching and closing,
-  2. take the largest step that can't skip a contact or a ball stopping (_safe_step),
+  1. drop moving balls that are within POCKET_R of a pocket, then resolve any contacts
+     (ball-ball or ball-cushion) that are touching and closing,
+  2. take the largest step that can't skip a contact, a pocket or a ball stopping
+     (_safe_step),
   3. move every ball exactly along its line for that step (_advance).
 This is "conservative advancement", chosen in issue #1. Cushion bounces go through
 reflect() and ball-ball hits through resolve_collision(), which are small enough to
 test and show on their own.
 
-Not modelled yet: pockets and scratches (issue #6) and recorded paths (issue #7), so
-`pocketed` is always [], `scratch` is False and `paths` is None for now.
+Pockets (issue #6): the pocket check runs before cushion bounces, so a ball at a pocket
+mouth drops instead of bouncing off the rail. A dropped ball is removed from play at
+once. Only moving balls are checked, so a ball resting near a pocket stays until hit.
+Physics never re-spots the cue ball after a scratch; the agent or app does that.
+
+Not modelled yet: recorded paths (issue #7), so `paths` is None for now.
 
 Constants are read from physics.params at call time so tests can monkeypatch them.
 """
@@ -18,7 +24,7 @@ from __future__ import annotations
 
 import math
 
-from core.state import BALL_R, TABLE_H, TABLE_W, Ball, Shot, ShotResult, TableState
+from core.state import BALL_R, POCKETS, TABLE_H, TABLE_W, Ball, Shot, ShotResult, TableState
 from physics import params
 
 D = 2 * BALL_R                               # centre distance when two balls touch
@@ -49,13 +55,22 @@ def simulate(state: TableState, shot: Shot, record_paths: bool = False) -> ShotR
     balls = [(x, y, vx, vy) if bid == 0 else (x, y, 0.0, 0.0)
              for bid, (x, y) in zip(ids, positions)]
 
-    first_contact = _run(balls, ids)
+    sunk = []                           # (ball id, pocket index), in the order they dropped
+    first_contact = _run(balls, ids, sunk)
 
-    final = {bid: (x, y) for bid, (x, y, _, _) in zip(ids, balls)}
-    out = [Ball(b.id, *final[b.id]) if b.id in final else Ball(b.id, b.x, b.y, True)
-           for b in state.balls]
-    return ShotResult(final=TableState(out, state.group), pocketed=[],
-                      first_contact=first_contact, scratch=False, paths=None)
+    on_table = {bid: (x, y) for bid, (x, y, _, _) in zip(ids, balls)}
+    in_pocket = dict(sunk)
+    out = []
+    for b in state.balls:
+        if b.id in on_table:
+            out.append(Ball(b.id, *on_table[b.id]))
+        elif b.id in in_pocket:
+            out.append(Ball(b.id, *POCKETS[in_pocket[b.id]], pocketed=True))
+        else:                           # already pocketed in the input
+            out.append(Ball(b.id, b.x, b.y, pocketed=True))
+    pocketed = [bid for bid, _ in sunk]
+    return ShotResult(final=TableState(out, state.group), pocketed=pocketed,
+                      first_contact=first_contact, scratch=0 in pocketed, paths=None)
 
 
 # --- cushions ----------------------------------------------------------------------
@@ -116,6 +131,37 @@ def _walls_hit(x, y, vx, vy):
     return walls
 
 
+# --- pockets -----------------------------------------------------------------------
+
+def _nearest_pocket(x, y):
+    """(distance, k): distance from a ball centre to the nearest pocket point, POCKETS[k]."""
+    best, best_k = math.inf, 0
+    for k, (px, py) in enumerate(POCKETS):
+        dist = math.hypot(x - px, y - py)
+        if dist < best:
+            best, best_k = dist, k
+    return best, best_k
+
+
+def _drop_pocketed(balls, ids, sunk, v_stop):
+    """Remove every moving ball that has reached a pocket. Mutates balls, ids and sunk.
+
+    A ball counts as in when its centre is within POCKET_R (plus CONTACT_TOL, so
+    _safe_step never has to creep up on the circle in ever smaller steps).
+    """
+    capture = params.POCKET_R + CONTACT_TOL
+    i = 0
+    while i < len(balls):
+        x, y, vx, vy = balls[i]
+        if math.hypot(vx, vy) > v_stop:
+            dist, k = _nearest_pocket(x, y)
+            if dist <= capture:
+                sunk.append((ids[i], k))
+                del balls[i], ids[i]
+                continue
+        i += 1
+
+
 # --- input clean-up ----------------------------------------------------------------
 
 def _clamp_inside(x: float, y: float) -> tuple[float, float]:
@@ -152,19 +198,20 @@ def _tidy_positions(positions):
 
 # --- stepping ----------------------------------------------------------------------
 
-def _run(balls, ids):
+def _run(balls, ids, sunk):
     """Move balls (list of (x, y, vx, vy), mutated in place) until all stop.
 
+    Pocketed balls are removed from balls and ids and appended to sunk as (id, pocket).
     Returns first_contact: the id of the first ball the cue ball touches, or None.
     """
-    decel, v_stop = params.DECEL, params.V_STOP
+    decel, v_stop, pocket_r = params.DECEL, params.V_STOP, params.POCKET_R
     max_time = params.MAX_TIME
 
     first_contact = None
     t = 0.0
     for _ in range(MAX_STEPS):
-        first_contact = _resolve_contacts(balls, ids, first_contact)
-        dt = _safe_step(balls, decel, v_stop)
+        first_contact = _resolve_contacts(balls, ids, sunk, first_contact, v_stop)
+        dt = _safe_step(balls, decel, v_stop, pocket_r)
         if dt == math.inf:                  # nothing is moving
             return first_contact
         t += dt
@@ -174,8 +221,8 @@ def _run(balls, ids):
     raise RuntimeError(f"simulate() did not settle within {MAX_STEPS} steps")
 
 
-def _safe_step(balls, decel, v_stop) -> float:
-    """Largest dt that can't skip a contact or a ball stopping.
+def _safe_step(balls, decel, v_stop, pocket_r) -> float:
+    """Largest dt that can't skip a contact, a pocket or a ball stopping.
 
     Speeds only decrease, so the current speeds are an upper bound for the whole step.
     """
@@ -194,6 +241,9 @@ def _safe_step(balls, decel, v_stop) -> float:
             dt = min(dt, max(Y_MAX - y, 0) / vy)
         elif vy < 0:
             dt = min(dt, max(y - Y_MIN, 0) / -vy)
+        gap = _nearest_pocket(x, y)[0] - pocket_r        # pockets
+        if gap > 0:
+            dt = min(dt, gap / s)
     for i in range(len(balls)):
         xi, yi, vxi, vyi = balls[i]
         for j in range(i + 1, len(balls)):
@@ -209,10 +259,15 @@ def _safe_step(balls, decel, v_stop) -> float:
     return dt
 
 
-def _resolve_contacts(balls, ids, first_contact):
-    """Bounce touching, closing pairs and cushion hits. Mutates balls."""
-    n = len(balls)
-    for _ in range(4 * n + 4):          # repeat for chains like a frozen rack
+def _resolve_contacts(balls, ids, sunk, first_contact, v_stop):
+    """Drop balls into pockets, then bounce cushion hits and touching, closing pairs.
+
+    Pockets are checked at the start of every round, so a ball that was just hit at a
+    pocket mouth drops before it can bounce off the rail. Mutates balls, ids and sunk.
+    """
+    for _ in range(4 * len(balls) + 4):     # repeat for chains like a frozen rack
+        _drop_pocketed(balls, ids, sunk, v_stop)
+        n = len(balls)
         changed = False
         for i in range(n):
             x, y, vx, vy = balls[i]
@@ -235,7 +290,9 @@ def _resolve_contacts(balls, ids, first_contact):
                 if first_contact is None and 0 in (ids[i], ids[j]):
                     first_contact = ids[j] if ids[i] == 0 else ids[i]
         if not changed:
-            break
+            return first_contact
+    # Ran out of rounds: a ball hit in the last round may be at a pocket mouth.
+    _drop_pocketed(balls, ids, sunk, v_stop)
     return first_contact
 
 

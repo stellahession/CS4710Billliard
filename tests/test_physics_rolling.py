@@ -34,6 +34,12 @@ def params():
     return params
 
 
+@pytest.fixture
+def no_pockets(params, monkeypatch):
+    # Keeps long rolls on the table once issue #6 makes balls drop near pockets.
+    monkeypatch.setattr(params, "POCKET_R", 0.0)
+
+
 def cue_at(x: float, y: float) -> TableState:
     return TableState([Ball(0, x, y)])
 
@@ -210,7 +216,8 @@ def test_max_time_leaves_room_for_a_full_power_roll(params):
 
 @pytest.mark.parametrize("deg", [0, 0.3, 17, 45, 90, 133, 200, 271, 333])
 def test_full_power_lone_cue_with_many_bounces_never_hits_the_guard(simulate, params,
-                                                                   monkeypatch, deg):
+                                                                   monkeypatch, no_pockets,
+                                                                   deg):
     # Tighten the guard to just over the longest possible roll: the simulator must
     # finish in time and not run on after the ball has stopped.
     monkeypatch.setattr(params, "MAX_TIME", params.V_MAX / params.DECEL * 1.001)
