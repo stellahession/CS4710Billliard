@@ -528,6 +528,18 @@ def test_first_contact_point_when_the_cue_starts_touching_the_ball(simulate, dem
         pytest.approx((1.0, MID_Y), abs=1e-9)
 
 
+def test_first_contact_point_uses_the_cleaned_up_cue_when_the_input_overlaps(
+        simulate_timeline, demo):
+    # The cue overlaps ball 1 by 2 mm, so clean-up pushes both apart before the shot. The
+    # viewer passes frames[0] (cleaned-up positions); the marker must be the cue's
+    # cleaned-up start, not its raw input position.
+    state = TableState([Ball(0, 1.0, MID_Y), Ball(1, 1.0 + 2 * BALL_R - 0.002, MID_Y)])
+    result, frames = simulate_timeline(state, Shot(0.0, 0.3))
+    start = frames[0][1]
+    assert start[0] != (1.0, MID_Y)
+    assert demo.first_contact_point(result, start) == pytest.approx(start[0], abs=1e-9)
+
+
 def test_first_contact_point_ignores_a_bounce_near_one_ball_width_away(demo):
     # A made-up path: the cue bounces at a point 2R + 0.5 mm from ball 1 (not touching),
     # then rolls straight into it. The marker must be on the hit, not the bounce.

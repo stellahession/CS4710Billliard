@@ -13,7 +13,8 @@ test and show on their own.
 
 Pockets (issue #6): the pocket check runs before cushion bounces, so a ball at a pocket
 mouth drops instead of bouncing off the rail. A dropped ball is removed from play at
-once. Only moving balls are checked, so a ball resting near a pocket stays until hit.
+once. Only moving balls heading into the pocket are checked, so a ball resting near a
+pocket stays until hit, and rolls out if it is hit away from the pocket.
 Physics never re-spots the cue ball after a scratch; the agent or app does that.
 
 Paths (issue #7): with record_paths=True, each ball's path is its event points. With no
@@ -87,14 +88,9 @@ def simulate_timeline(state: TableState, shot: Shot, dt: float = 1 / 30):
 
 
 def _position_after(ball, tau, decel, v_stop):
-    """Where a ball (x, y, vx, vy) is after tau seconds of rolling in a straight line."""
-    x, y, vx, vy = ball
-    s = math.hypot(vx, vy)
-    if s <= v_stop:
-        return float(x), float(y)
-    tau = min(tau, s / decel)
-    dist = s * tau - 0.5 * decel * tau * tau
-    return float(x + vx / s * dist), float(y + vy / s * dist)
+    """Where a ball (x, y, vx, vy) is after tau seconds, using the same motion as _advance."""
+    x, y, _, _ = _roll(ball, tau, decel, v_stop)
+    return float(x), float(y)
 
 
 def _simulate(state, shot, record_paths, steps=None):
@@ -242,7 +238,9 @@ def _drop_pocketed(balls, ids, sunk, v_stop):
     """Remove every moving ball that has reached a pocket. Mutates balls, ids and sunk.
 
     A ball counts as in when its centre is within POCKET_R (plus CONTACT_TOL, so
-    _safe_step never has to creep up on the circle in ever smaller steps).
+    _safe_step never has to creep up on the circle in ever smaller steps) and it is
+    heading into the pocket. A ball resting in a pocket mouth that is hit or shot away
+    from the pocket rolls out instead of dropping.
     """
     capture = params.POCKET_R + CONTACT_TOL
     i = 0
@@ -250,7 +248,8 @@ def _drop_pocketed(balls, ids, sunk, v_stop):
         x, y, vx, vy = balls[i]
         if math.hypot(vx, vy) > v_stop:
             dist, k = _nearest_pocket(x, y)
-            if dist <= capture:
+            px, py = POCKETS[k]
+            if dist <= capture and (px - x) * vx + (py - y) * vy > 0:
                 sunk.append((ids[i], k))
                 del balls[i], ids[i]
                 continue
@@ -445,15 +444,24 @@ def _resolve_contacts(balls, ids, sunk, first_contact, v_stop, paths=None):
 
 def _advance(balls, dt, decel, v_stop):
     """Move every ball exactly along its line for dt with constant deceleration."""
-    for i, (x, y, vx, vy) in enumerate(balls):
-        s = math.hypot(vx, vy)
-        if s <= v_stop:                 # at rest: clear any leftover crawl speed
-            balls[i] = (x, y, 0.0, 0.0)
-            continue
-        new_s = s - decel * dt
-        dist = s * dt - 0.5 * decel * dt * dt
-        ux, uy = vx / s, vy / s
-        if new_s <= v_stop:
-            balls[i] = (x + ux * dist, y + uy * dist, 0.0, 0.0)
-        else:
-            balls[i] = (x + ux * dist, y + uy * dist, ux * new_s, uy * new_s)
+    for i, ball in enumerate(balls):
+        balls[i] = _roll(ball, dt, decel, v_stop)
+
+
+def _roll(ball, dt, decel, v_stop):
+    """A ball (x, y, vx, vy) after dt seconds rolling in a straight line, as a new tuple.
+
+    It slows by decel and stays put once it stops. A ball at rest has any leftover crawl
+    speed cleared.
+    """
+    x, y, vx, vy = ball
+    s = math.hypot(vx, vy)
+    if s <= v_stop:
+        return x, y, 0.0, 0.0
+    dt = min(dt, s / decel)             # no rolling backwards after it stops
+    new_s = s - decel * dt
+    dist = s * dt - 0.5 * decel * dt * dt
+    ux, uy = vx / s, vy / s
+    if new_s <= v_stop:
+        return x + ux * dist, y + uy * dist, 0.0, 0.0
+    return x + ux * dist, y + uy * dist, ux * new_s, uy * new_s

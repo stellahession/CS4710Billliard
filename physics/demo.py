@@ -18,11 +18,10 @@ from pathlib import Path
 
 from core.state import BALL_R, POCKETS, TABLE_H, TABLE_W, Shot, TableState
 from physics import params
-from physics.simulate import simulate_timeline
+from physics.simulate import CONTACT_TOL, D, simulate_timeline
 
 FPS = 30
 PAD = 0.08              # m, rail width drawn around the playing surface
-CONTACT_TOL = 1e-5      # m, a cue this close to one ball-width away starts touching
 CLOTH = "#1f6b3a"
 RAIL = "#5b3a1e"
 # Standard pool colours for 1-7; stripes 9-15 use the same colour as id - 8.
@@ -54,20 +53,21 @@ def first_contact_point(result, start: dict):
     if result.first_contact not in start or not result.paths or 0 not in result.paths:
         return None
     ox, oy = start[result.first_contact]
-    path = result.paths[0]
-    d = 2 * BALL_R
+    # path[0] is the raw input, which can overlap a ball. Start from the cue's position
+    # in `start` instead, so both balls come from the same (cleaned-up) frame.
+    path = [start.get(0, result.paths[0][0]), *result.paths[0][1:]]
     px, py = path[0]
-    if math.hypot(px - ox, py - oy) <= d + CONTACT_TOL:
+    if math.hypot(px - ox, py - oy) <= D + CONTACT_TOL:
         return px, py
     for (ax, ay), (bx, by) in zip(path, path[1:]):
-        # Solve |a + t*(b - a) - o| = d for the smallest t in [0, 1].
+        # Solve |a + t*(b - a) - o| = D for the smallest t in [0, 1].
         ux, uy = bx - ax, by - ay
         fx, fy = ax - ox, ay - oy
         a = ux * ux + uy * uy
         if a == 0:
             continue
         b = 2 * (fx * ux + fy * uy)
-        c = fx * fx + fy * fy - d * d
+        c = fx * fx + fy * fy - D * D
         disc = b * b - 4 * a * c
         if disc < 0:
             continue

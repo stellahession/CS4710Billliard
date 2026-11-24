@@ -21,9 +21,8 @@ import sys
 import time
 
 from core.state import BALL_R, TABLE_H, TABLE_W, Ball, Shot, TableState
-from physics.simulate import simulate
+from physics.simulate import D, simulate
 
-D = 2 * BALL_R
 SEED = 4710
 N_TABLES = 10
 BALLS_PER_TABLE = 8             # cue + 7 object balls

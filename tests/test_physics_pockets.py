@@ -10,6 +10,9 @@ Model expected (physics/simulate.py, constants from physics.params read at call 
     it has pocketed=True and x, y equal to that pocket's coordinates.
   - Only moving balls are checked: a ball resting inside the capture radius stays put
     unless it is hit.
+  - A moving ball inside the capture radius only drops if it is heading into the pocket
+    (its velocity points closer to the pocket point). A ball resting in a pocket mouth
+    that is hit or shot away from the pocket rolls out instead of dropping.
   - `pocketed` lists the balls sunk this shot in the order they dropped.
   - scratch is True exactly when the cue ball (id 0) is pocketed. Physics never re-spots
     the cue ball; that is left to the agent or app.
@@ -331,6 +334,46 @@ def test_resting_ball_inside_the_capture_radius_drops_when_hit(simulate, params)
     result = simulate(state, Shot(aim(u), power_to_arrive(params, 0.5, 0.5 - D)))
     assert result.pocketed == [7]
     assert_sunk_in(result, 7, 0)
+
+
+# --- a ball inside the capture radius only drops if it heads into the pocket ---------
+
+def test_cue_inside_the_capture_radius_shot_out_of_the_pocket_is_not_a_scratch(simulate,
+                                                                            params):
+    # The cue rests on the bottom rail 4 cm from side pocket (1.27, 0) and is shot
+    # straight up the table, away from the pocket. Soft enough to stop short of the top
+    # side pocket on the same line.
+    cue = (1.30, 0.03)
+    assert math.hypot(cue[0] - POCKETS[1][0], cue[1]) < params.POCKET_R
+    state = TableState([Ball(0, *cue), Ball(1, 1.0, 1.0)])
+    result = simulate(state, Shot(math.pi / 2, 0.05))
+    assert result.pocketed == []
+    assert result.scratch is False
+
+
+def test_cue_in_a_corner_shot_out_along_the_diagonal_is_not_a_scratch(simulate, params):
+    # Vision can put the cue right in a corner, inside the capture radius of (0, 0).
+    cue = (0.035, 0.035)
+    assert math.hypot(*cue) < params.POCKET_R
+    target = (1.0, 1.0)
+    angle = math.atan2(target[1] - cue[1], target[0] - cue[0])
+    result = simulate(TableState([Ball(0, *cue), Ball(1, *target)]), Shot(angle, 0.5))
+    assert 0 not in result.pocketed
+    assert result.first_contact == 1
+
+
+def test_resting_ball_inside_the_capture_radius_hit_away_from_the_pocket_stays(simulate,
+                                                                             params):
+    # Ball 7 rests in the mouth of side pocket (1.27, 0), just past its centre line. The
+    # cue, outside the capture radius, hits it along the rail, away from the pocket.
+    # Soft enough that ball 7 stops well short of the corner pocket on that line.
+    obj = (POCKETS[1][0] + 0.005, 0.05)
+    cue = (obj[0] - D - 0.001, obj[1])
+    assert math.dist(obj, POCKETS[1]) < params.POCKET_R < math.dist(cue, POCKETS[1])
+    result = simulate(TableState([Ball(0, *cue), Ball(7, *obj)]), Shot(0.0, 0.03))
+    assert result.first_contact == 7
+    assert result.pocketed == []
+    assert ball(result.final, 7).x > obj[0] + 0.1
 
 
 # --- pocketed balls leave play ------------------------------------------------------
