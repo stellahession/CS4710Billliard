@@ -431,6 +431,32 @@ def test_first_contact_ignores_balls_the_cue_touches_later(simulate, params, ela
     assert live_positions(result)[12] != pytest.approx(b, abs=0.01)     # B was hit
 
 
+def split_hit_balls(gap_8: float = 0.0) -> list[Ball]:
+    """Cue on the mid line aimed along +x, with ball 8 at +17° and ball 3 at -17° from
+    where it first touches them. Ball 8 sits gap_8 m further along +x than ball 3."""
+    up, down = unit(17), unit(-17)
+    return [Ball(0, *CUE_START),
+            Ball(8, CONTACT_X + gap_8 + D * up[0], MID_Y + D * up[1]),
+            Ball(3, CONTACT_X + D * down[0], MID_Y + D * down[1])]
+
+
+@pytest.mark.parametrize("order", [[0, 1, 2], [0, 2, 1], [2, 0, 1], [1, 2, 0]])
+def test_split_hit_first_contact_is_the_lower_id_in_any_order(simulate, order):
+    # The cue reaches balls 8 and 3 at the same moment: a split hit. The answer must
+    # not depend on the order vision lists the balls in.
+    balls = split_hit_balls()
+    result = simulate(TableState([balls[k] for k in order]), Shot(0.0, 0.5))
+    assert result.first_contact == 3
+
+
+@pytest.mark.parametrize("order", [[0, 1, 2], [0, 2, 1]])
+def test_nearly_split_hit_first_contact_is_the_ball_reached_first(simulate, order):
+    # Ball 3 is 1 mm further away, so the cue reaches ball 8 first, whatever the ids.
+    balls = split_hit_balls(gap_8=-0.001)
+    result = simulate(TableState([balls[k] for k in order]), Shot(0.0, 0.5))
+    assert result.first_contact == 8
+
+
 # --- full simulation: chains --------------------------------------------------------
 
 def chain_table() -> TableState:

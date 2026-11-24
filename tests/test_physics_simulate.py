@@ -207,6 +207,14 @@ def test_pocketed_cue_ball_raises_value_error(simulate):
         simulate(state, Shot(0.0, 0.5))
 
 
+@pytest.mark.parametrize("second", [Ball(3, 1.5, 0.9), Ball(3, 1.5, 0.9, pocketed=True)])
+def test_repeated_ball_id_raises_value_error(simulate, second):
+    # Results are keyed by id, so a repeated id would quietly merge two balls into one.
+    state = TableState([Ball(0, 0.5, 0.6), Ball(3, 1.5, 0.3), second])
+    with pytest.raises(ValueError, match=r"repeated ids: \[3\]"):
+        simulate(state, Shot(0.0, 0.5))
+
+
 # --- power and angle -------------------------------------------------------------
 
 @pytest.mark.parametrize("given, clamped", [(1.5, 1.0), (100.0, 1.0), (-0.3, 0.0), (-5.0, 0.0)])

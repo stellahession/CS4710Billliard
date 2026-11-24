@@ -37,6 +37,7 @@ from __future__ import annotations
 
 import math
 import warnings
+from collections import Counter
 
 from core.state import BALL_R, POCKETS, TABLE_H, TABLE_W, Ball, Shot, ShotResult, TableState
 from physics import params
@@ -95,6 +96,10 @@ def _position_after(ball, tau, decel, v_stop):
 
 def _simulate(state, shot, record_paths, steps=None):
     """simulate(), plus an optional `steps` list that _run fills for simulate_timeline."""
+    counts = Counter(b.id for b in state.balls)
+    repeated = sorted(bid for bid, n in counts.items() if n > 1)
+    if repeated:
+        raise ValueError(f"simulate() needs each ball id once; repeated ids: {repeated}")
     cue = next((b for b in state.balls if b.id == 0), None)
     if cue is None:
         raise ValueError("simulate() needs a cue ball (id 0) in state.balls")
@@ -414,6 +419,8 @@ def _resolve_contacts(balls, ids, sunk, first_contact, v_stop, paths=None):
             changed = True
             if paths is not None:
                 _add_point(paths[ids[i]], x, y)
+        if first_contact is None:
+            first_contact = _cue_contact(balls, ids)
         for i in range(n):
             for j in range(i + 1, n):
                 xi, yi, vxi, vyi = balls[i]
@@ -433,13 +440,32 @@ def _resolve_contacts(balls, ids, sunk, first_contact, v_stop, paths=None):
                 if paths is not None:
                     _add_point(paths[ids[i]], xi, yi)
                     _add_point(paths[ids[j]], xj, yj)
-                if first_contact is None and 0 in (ids[i], ids[j]):
-                    first_contact = ids[j] if ids[i] == 0 else ids[i]
         if not changed:
             return first_contact
     # Ran out of rounds: a ball hit in the last round may be at a pocket mouth.
     _drop_pocketed(balls, ids, sunk, v_stop)
     return first_contact
+
+
+def _cue_contact(balls, ids):
+    """The id of the ball the cue is touching and moving into, or None.
+
+    Until the cue touches a ball, nothing else moves, so the first ball found here is
+    first_contact. If the cue touches two at once (a split hit), the lower id is
+    returned, so the answer doesn't depend on the order of state.balls.
+    """
+    if 0 not in ids:                    # the cue has already dropped
+        return None
+    xc, yc, vxc, vyc = balls[ids.index(0)]
+    touched = []
+    for bid, (x, y, vx, vy) in zip(ids, balls):
+        dx, dy = x - xc, y - yc
+        dist = math.hypot(dx, dy)
+        if bid == 0 or dist == 0 or dist - D > CONTACT_TOL:
+            continue
+        if (vxc - vx) * dx + (vyc - vy) * dy > 0:   # closing, as in resolve_collision
+            touched.append(bid)
+    return min(touched, default=None)
 
 
 def _advance(balls, dt, decel, v_stop):
