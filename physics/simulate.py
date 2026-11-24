@@ -6,7 +6,8 @@ deceleration. Each loop we:
   2. take the largest step that can't skip a contact or a ball stopping (_safe_step),
   3. move every ball exactly along its line for that step (_advance).
 This is "conservative advancement", chosen in issue #1. Cushion bounces go through
-reflect(), which is small enough to test and show on its own.
+reflect() and ball-ball hits through resolve_collision(), which are small enough to
+test and show on their own.
 
 Not modelled yet: pockets and scratches (issue #6) and recorded paths (issue #7), so
 `pocketed` is always [], `scratch` is False and `paths` is None for now.
@@ -74,6 +75,29 @@ def reflect(vel: tuple[float, float], wall: str) -> tuple[float, float]:
     raise ValueError(f"unknown wall {wall!r}; expected left, right, bottom or top")
 
 
+# --- ball-ball collisions ----------------------------------------------------------
+
+def resolve_collision(p1, v1, p2, v2):
+    """Collide two equal-mass balls with no spin and no throw.
+
+    p1, p2 are the (x, y) centres and v1, v2 the (vx, vy) velocities. Along the line
+    through the two centres the balls exchange momentum, scaled by params.E_BALL; the
+    components across that line are kept. With E_BALL = 1 the components along the line
+    simply swap, which gives the 90° rule for cuts. Balls that are not closing are left
+    alone. Returns new (v1', v2') tuples.
+    """
+    dx, dy = p2[0] - p1[0], p2[1] - p1[1]
+    dist = math.hypot(dx, dy)
+    if dist == 0:                       # no line of centres to push along
+        return (v1[0], v1[1]), (v2[0], v2[1])
+    nx, ny = dx / dist, dy / dist
+    closing = (v1[0] - v2[0]) * nx + (v1[1] - v2[1]) * ny
+    if closing <= 0:
+        return (v1[0], v1[1]), (v2[0], v2[1])
+    k = (1 + params.E_BALL) / 2 * closing
+    return (v1[0] - k * nx, v1[1] - k * ny), (v2[0] + k * nx, v2[1] + k * ny)
+
+
 def _walls_hit(x, y, vx, vy):
     """The cushions the ball is touching and moving into (a corner can give two)."""
     walls = []
@@ -130,12 +154,12 @@ def _run(balls, ids):
     Returns first_contact: the id of the first ball the cue ball touches, or None.
     """
     decel, v_stop = params.DECEL, params.V_STOP
-    e_ball, max_time = params.E_BALL, params.MAX_TIME
+    max_time = params.MAX_TIME
 
     first_contact = None
     t = 0.0
     for _ in range(MAX_STEPS):
-        first_contact = _resolve_contacts(balls, ids, first_contact, e_ball)
+        first_contact = _resolve_contacts(balls, ids, first_contact)
         dt = _safe_step(balls, decel, v_stop)
         if dt == math.inf:                  # nothing is moving
             return first_contact
@@ -181,7 +205,7 @@ def _safe_step(balls, decel, v_stop) -> float:
     return dt
 
 
-def _resolve_contacts(balls, ids, first_contact, e_ball):
+def _resolve_contacts(balls, ids, first_contact):
     """Bounce touching, closing pairs and cushion hits. Mutates balls."""
     n = len(balls)
     for _ in range(4 * n + 4):          # repeat for chains like a frozen rack
@@ -196,19 +220,13 @@ def _resolve_contacts(balls, ids, first_contact, e_ball):
             for j in range(i + 1, n):
                 xi, yi, vxi, vyi = balls[i]
                 xj, yj, vxj, vyj = balls[j]
-                dx, dy = xj - xi, yj - yi
-                dist = math.hypot(dx, dy)
-                if dist - D > CONTACT_TOL:
+                if math.hypot(xj - xi, yj - yi) - D > CONTACT_TOL:
                     continue
-                nx, ny = dx / dist, dy / dist
-                closing = (vxi - vxj) * nx + (vyi - vyj) * ny
-                if closing <= 0:
-                    continue
-                # Equal masses, no spin: exchange momentum along the line of centres.
-                # With E_BALL = 1 this swaps the normal components exactly.
-                k = (1 + e_ball) / 2 * closing
-                balls[i] = (xi, yi, vxi - k * nx, vyi - k * ny)
-                balls[j] = (xj, yj, vxj + k * nx, vyj + k * ny)
+                vi, vj = resolve_collision((xi, yi), (vxi, vyi), (xj, yj), (vxj, vyj))
+                if vi == (vxi, vyi) and vj == (vxj, vyj):
+                    continue                    # touching but not closing
+                balls[i] = (xi, yi, *vi)
+                balls[j] = (xj, yj, *vj)
                 changed = True
                 if first_contact is None and 0 in (ids[i], ids[j]):
                     first_contact = ids[j] if ids[i] == 0 else ids[i]
