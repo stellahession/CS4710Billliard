@@ -10,8 +10,8 @@ Interface expected (physics/simulate.py):
 
 In the full simulation a ball's centre bounces at BALL_R from the cushion line, so it
 stays inside [BALL_R, TABLE_W - BALL_R] x [BALL_R, TABLE_H - BALL_R]. Pockets near the
-cushions come in issue #6, so every shot here keeps its ball away from the pockets or
-only checks that it stays on the table.
+cushions come in issue #6, so tests that need a ball to survive a long roll turn pockets
+off with the no_pockets fixture (POCKET_R = 0); the rest only check balls still on the table.
 """
 import math
 
@@ -46,6 +46,12 @@ def reflect():
 def params():
     from physics import params
     return params
+
+
+@pytest.fixture
+def no_pockets(params, monkeypatch):
+    # Keeps these tests about cushions once issue #6 makes balls drop near pockets.
+    monkeypatch.setattr(params, "POCKET_R", 0.0)
 
 
 def cue_at(x: float, y: float) -> TableState:
@@ -205,7 +211,8 @@ def test_head_on_bounce_stops_where_e_cushion_says(simulate, params, wall, start
 
 
 @pytest.mark.parametrize("deg", [20, 45, 70, 110, 160, 200, 250, 290, 340])
-def test_elastic_bounces_end_where_the_mirror_image_says(simulate, params, monkeypatch, deg):
+def test_elastic_bounces_end_where_the_mirror_image_says(simulate, params, monkeypatch,
+                                                         no_pockets, deg):
     # With E_CUSHION = 1 the angle in equals the angle out at every cushion, so the stop
     # point is the straight-line stop point folded back into the table.
     monkeypatch.setattr(params, "E_CUSHION", 1.0)
@@ -214,11 +221,6 @@ def test_elastic_bounces_end_where_the_mirror_image_says(simulate, params, monke
     dist = roll_distance(params, power * params.V_MAX)
     a = math.radians(deg)
     expected = mirror_into_table(x0 + dist * math.cos(a), y0 + dist * math.sin(a))
-    # Keep clear of pockets (issue #6) so this test only checks the bounces.
-    assert all(math.hypot(expected[0] - px, expected[1] - py) > 0.15
-               for px, py in [(0, 0), (TABLE_W / 2, 0), (TABLE_W, 0),
-                              (0, TABLE_H), (TABLE_W / 2, TABLE_H), (TABLE_W, TABLE_H)])
-
     result = simulate(cue_at(x0, y0), Shot(a, power))
     x, y = final_positions(result)[0]
     assert x == pytest.approx(expected[0], abs=STOP_TOL)
@@ -274,7 +276,8 @@ def test_full_power_never_passes_through_a_cushion(simulate, aim, start):
 
 @pytest.mark.parametrize("aim", list(AIMS))
 def test_full_power_with_elastic_cushions_and_fast_balls_stays_inside(simulate, params,
-                                                                      monkeypatch, aim):
+                                                                      monkeypatch, no_pockets,
+                                                                      aim):
     # Harsher than the real table: no energy lost at cushions and a much faster cue.
     monkeypatch.setattr(params, "E_CUSHION", 1.0)
     monkeypatch.setattr(params, "V_MAX", 20.0)
@@ -283,9 +286,9 @@ def test_full_power_with_elastic_cushions_and_fast_balls_stays_inside(simulate, 
     assert_inside(*final_positions(result)[0])
 
 
-def test_ball_aimed_exactly_into_a_corner_comes_back_out(simulate, params):
-    # Hits both cushions at once: both components flip. With pockets off the table this
-    # can't sit outside either cushion line.
+def test_ball_aimed_exactly_into_a_corner_comes_back_out(simulate, no_pockets):
+    # Hits both cushions at once, so both components flip and it comes back out. In the
+    # real game this is a pocket; pockets are off here.
     x0, y0 = X_MAX - 0.4, Y_MAX - 0.4
     result = simulate(cue_at(x0, y0), Shot(math.pi / 4, 0.5))
     assert_inside(*final_positions(result)[0])
@@ -294,7 +297,7 @@ def test_ball_aimed_exactly_into_a_corner_comes_back_out(simulate, params):
 # --- several bounces, then at rest ------------------------------------------------
 
 @pytest.mark.parametrize("deg", [3, 17, 45, 88, 135, 222, 300])
-def test_many_bounces_still_end_at_rest_inside(simulate, params, deg):
+def test_many_bounces_still_end_at_rest_inside(simulate, params, no_pockets, deg):
     # Full power rolls far more than a lap of the table, so this bounces several times.
     assert roll_distance(params, params.V_MAX) > 2 * (TABLE_W + TABLE_H)
     result = simulate(cue_at(0.4, 0.3), Shot(math.radians(deg), 1.0))

@@ -5,7 +5,8 @@ deceleration. Each loop we:
   1. resolve any contacts (ball-ball or ball-cushion) that are touching and closing,
   2. take the largest step that can't skip a contact or a ball stopping (_safe_step),
   3. move every ball exactly along its line for that step (_advance).
-This is "conservative advancement", chosen in issue #1.
+This is "conservative advancement", chosen in issue #1. Cushion bounces go through
+reflect(), which is small enough to test and show on its own.
 
 Not modelled yet: pockets and scratches (issue #6) and recorded paths (issue #7), so
 `pocketed` is always [], `scratch` is False and `paths` is None for now.
@@ -56,6 +57,37 @@ def simulate(state: TableState, shot: Shot, record_paths: bool = False) -> ShotR
                       first_contact=first_contact, scratch=False, paths=None)
 
 
+# --- cushions ----------------------------------------------------------------------
+
+def reflect(vel: tuple[float, float], wall: str) -> tuple[float, float]:
+    """Bounce a velocity off one cushion: "left", "right", "bottom" or "top".
+
+    The component perpendicular to the cushion flips and is scaled by params.E_CUSHION;
+    the component along the cushion is kept. Returns a new (vx, vy).
+    """
+    vx, vy = vel
+    e = params.E_CUSHION
+    if wall in ("left", "right"):
+        return -e * vx, vy
+    if wall in ("bottom", "top"):
+        return vx, -e * vy
+    raise ValueError(f"unknown wall {wall!r}; expected left, right, bottom or top")
+
+
+def _walls_hit(x, y, vx, vy):
+    """The cushions the ball is touching and moving into (a corner can give two)."""
+    walls = []
+    if x <= X_MIN + CONTACT_TOL and vx < 0:
+        walls.append("left")
+    elif x >= X_MAX - CONTACT_TOL and vx > 0:
+        walls.append("right")
+    if y <= Y_MIN + CONTACT_TOL and vy < 0:
+        walls.append("bottom")
+    elif y >= Y_MAX - CONTACT_TOL and vy > 0:
+        walls.append("top")
+    return walls
+
+
 # --- input clean-up ----------------------------------------------------------------
 
 def _clamp_inside(x: float, y: float) -> tuple[float, float]:
@@ -98,12 +130,12 @@ def _run(balls, ids):
     Returns first_contact: the id of the first ball the cue ball touches, or None.
     """
     decel, v_stop = params.DECEL, params.V_STOP
-    e_ball, e_cushion, max_time = params.E_BALL, params.E_CUSHION, params.MAX_TIME
+    e_ball, max_time = params.E_BALL, params.MAX_TIME
 
     first_contact = None
     t = 0.0
     for _ in range(MAX_STEPS):
-        first_contact = _resolve_contacts(balls, ids, first_contact, e_ball, e_cushion)
+        first_contact = _resolve_contacts(balls, ids, first_contact, e_ball)
         dt = _safe_step(balls, decel, v_stop)
         if dt == math.inf:                  # nothing is moving
             return first_contact
@@ -149,17 +181,16 @@ def _safe_step(balls, decel, v_stop) -> float:
     return dt
 
 
-def _resolve_contacts(balls, ids, first_contact, e_ball, e_cushion):
+def _resolve_contacts(balls, ids, first_contact, e_ball):
     """Bounce touching, closing pairs and cushion hits. Mutates balls."""
     n = len(balls)
     for _ in range(4 * n + 4):          # repeat for chains like a frozen rack
         changed = False
         for i in range(n):
             x, y, vx, vy = balls[i]
-            if (x <= X_MIN + CONTACT_TOL and vx < 0) or (x >= X_MAX - CONTACT_TOL and vx > 0):
-                vx, changed = -e_cushion * vx, True
-            if (y <= Y_MIN + CONTACT_TOL and vy < 0) or (y >= Y_MAX - CONTACT_TOL and vy > 0):
-                vy, changed = -e_cushion * vy, True
+            for wall in _walls_hit(x, y, vx, vy):
+                vx, vy = reflect((vx, vy), wall)
+                changed = True
             balls[i] = (x, y, vx, vy)
         for i in range(n):
             for j in range(i + 1, n):
