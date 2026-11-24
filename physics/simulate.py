@@ -26,11 +26,16 @@ the same shot, keeps a copy of the balls at the start of every step, and samples
 positions at fixed times by moving each ball along its line from the step before. The
 agent never calls it, and simulate() only pays one `is None` check per step for it.
 
+Guards: if a shot hasn't settled after MAX_TIME seconds or MAX_STEPS steps, every ball
+is stopped where it is and a RuntimeWarning is issued. simulate() still returns a result,
+so one odd shot can't stop the agent's whole search.
+
 Constants are read from physics.params at call time so tests can monkeypatch them.
 """
 from __future__ import annotations
 
 import math
+import warnings
 
 from core.state import BALL_R, POCKETS, TABLE_H, TABLE_W, Ball, Shot, ShotResult, TableState
 from physics import params
@@ -40,7 +45,7 @@ X_MIN, X_MAX = BALL_R, TABLE_W - BALL_R      # where a ball centre touches a cus
 Y_MIN, Y_MAX = BALL_R, TABLE_H - BALL_R
 CONTACT_TOL = 1e-5      # m, a gap smaller than this counts as touching
 MAX_STEPS = 100_000     # backstop in case steps get tiny and MAX_TIME is never reached
-NUDGE_ROUNDS = 100      # passes used to push overlapping input balls apart
+NUDGE_ROUNDS = 300      # passes to push overlapping input balls apart (6 piled up need ~200)
 NUDGE_MARGIN = 1e-9     # m, extra push so float rounding can't leave a pair overlapping
 PATH_MIN_GAP = 1e-9     # m, a path point this close to the previous one is not added
 
@@ -127,7 +132,8 @@ def _simulate(state, shot, record_paths, steps=None):
         if b.id in on_table:
             out.append(Ball(b.id, *on_table[b.id]))
         elif b.id in in_pocket:
-            out.append(Ball(b.id, *POCKETS[in_pocket[b.id]], pocketed=True))
+            px, py = POCKETS[in_pocket[b.id]]     # POCKETS mixes ints and floats
+            out.append(Ball(b.id, float(px), float(py), pocketed=True))
         else:                           # already pocketed in the input
             out.append(Ball(b.id, b.x, b.y, pocketed=True))
     pocketed = [bid for bid, _ in sunk]
@@ -153,7 +159,7 @@ def _finish_paths(paths, inputs, finals):
         if b_in.id not in paths or (b_in.x, b_in.y) == (b_out.x, b_out.y):
             continue
         path = paths[b_in.id]
-        # The pocket's coordinates if it dropped. POCKETS mixes ints and floats, so convert.
+        # The pocket's coordinates if it dropped.
         end = (float(b_out.x), float(b_out.y))
         _add_point(path, *end)
         if len(path) > 1:
@@ -262,7 +268,9 @@ def _tidy_positions(positions):
 
     Vision output can be slightly off, so this fixes small errors on a copy. Each pass
     moves both balls of an overlapping pair half the overlap apart along the line
-    between their centres (along +x if the centres coincide), then clamps again.
+    between their centres (along +x if the centres coincide), then clamps again. If a
+    cushion stops one ball short, the other ball takes the rest of the push. If balls
+    still overlap after NUDGE_ROUNDS passes, a RuntimeWarning is issued.
     """
     pos = [_clamp_inside(x, y) for x, y in positions]
     n = len(pos)
@@ -277,11 +285,19 @@ def _tidy_positions(positions):
                     continue
                 nx, ny = (dx / dist, dy / dist) if dist > 1e-12 else (1.0, 0.0)
                 push = (D - dist) / 2 + NUDGE_MARGIN
-                pos[i] = _clamp_inside(xi - nx * push, yi - ny * push)
-                pos[j] = _clamp_inside(xj + nx * push, yj + ny * push)
+                pi = _clamp_inside(xi - nx * push, yi - ny * push)
+                pj = _clamp_inside(xj + nx * push, yj + ny * push)
+                # How much of each ball's push a cushion blocked; the other ball takes it.
+                short_i = push - ((xi - pi[0]) * nx + (yi - pi[1]) * ny)
+                short_j = push - ((pj[0] - xj) * nx + (pj[1] - yj) * ny)
+                pos[i] = _clamp_inside(pi[0] - nx * short_j, pi[1] - ny * short_j)
+                pos[j] = _clamp_inside(pj[0] + nx * short_i, pj[1] + ny * short_i)
                 moved = True
         if not moved:
-            break
+            return pos
+    if any(math.dist(pos[i], pos[j]) < D for i in range(n) for j in range(i + 1, n)):
+        warnings.warn("simulate() could not push every overlapping input ball apart",
+                      RuntimeWarning, stacklevel=4)
     return pos
 
 
@@ -295,6 +311,7 @@ def _run(balls, ids, sunk, paths=None, steps=None):
     If steps is a list, (t, ids, balls) is appended to it at the start of every step,
     after contacts are resolved, with copies of ids and balls.
     Returns first_contact: the id of the first ball the cue ball touches, or None.
+    If MAX_TIME or MAX_STEPS is reached, every ball is stopped where it is (with a warning).
     """
     decel, v_stop, pocket_r = params.DECEL, params.V_STOP, params.POCKET_R
     max_time = params.MAX_TIME
@@ -310,22 +327,38 @@ def _run(balls, ids, sunk, paths=None, steps=None):
             return first_contact
         t += dt
         if t > max_time:
-            raise RuntimeError(f"simulate() did not settle within MAX_TIME={max_time} s")
+            return _give_up(balls, first_contact, f"MAX_TIME={max_time} s")
         _advance(balls, dt, decel, v_stop)
-    raise RuntimeError(f"simulate() did not settle within {MAX_STEPS} steps")
+    return _give_up(balls, first_contact, f"{MAX_STEPS} steps")
+
+
+def _give_up(balls, first_contact, limit):
+    """Stop every ball where it is and warn. Used when a guard is reached."""
+    warnings.warn(f"simulate() did not settle within {limit}; stopping every ball where it is",
+                  RuntimeWarning, stacklevel=5)
+    for i, (x, y, _, _) in enumerate(balls):
+        balls[i] = (x, y, 0.0, 0.0)
+    return first_contact
 
 
 def _safe_step(balls, decel, v_stop, pocket_r) -> float:
     """Largest dt that can't skip a contact, a pocket or a ball stopping.
 
     Speeds only decrease, so the current speeds are an upper bound for the whole step.
+    For a pair of balls we use the larger of two safe bounds on how long the gap takes
+    to close:
+      - gap / (speed_i + speed_j): neither ball can move further than its speed allows;
+      - the t with r*t + DECEL*t^2 = gap, where r is their relative speed: friction
+        changes each velocity by at most DECEL*t, so the relative velocity changes by at
+        most 2*DECEL*t. This one keeps balls rolling side by side from taking tiny steps.
+    Pairs where both balls are at rest are skipped: they can't collide.
     """
     speeds = [math.hypot(vx, vy) for _, _, vx, vy in balls]
+    moving = [i for i, s in enumerate(speeds) if s > v_stop]
     dt = math.inf
-    for i, (x, y, vx, vy) in enumerate(balls):
+    for i in moving:
+        x, y, vx, vy = balls[i]
         s = speeds[i]
-        if s <= v_stop:
-            continue
         dt = min(dt, s / decel)                          # don't step past it stopping
         if vx > 0:                                       # cushions
             dt = min(dt, max(X_MAX - x, 0) / vx)
@@ -338,18 +371,24 @@ def _safe_step(balls, decel, v_stop, pocket_r) -> float:
         gap = _nearest_pocket(x, y)[0] - pocket_r        # pockets
         if gap > 0:
             dt = min(dt, gap / s)
-    for i in range(len(balls)):
+    for i in moving:
         xi, yi, vxi, vyi = balls[i]
-        for j in range(i + 1, len(balls)):
-            combined = speeds[i] + speeds[j]
-            if combined <= v_stop:
-                continue
+        for j in range(len(balls)):
+            if j == i or (j < i and speeds[j] > v_stop):
+                continue                     # same ball, or a moving pair done as (j, i)
             xj, yj, vxj, vyj = balls[j]
             dx, dy = xj - xi, yj - yi
+            combined = speeds[i] + speeds[j]
+            if max(abs(dx), abs(dy)) - D >= dt * combined:
+                continue                     # quick check: too far apart to matter
             gap = math.hypot(dx, dy) - D
             if gap <= CONTACT_TOL and (vxi - vxj) * dx + (vyi - vyj) * dy <= 0:
                 continue                                 # touching but separating
-            dt = min(dt, max(gap, 0) / combined)
+            if gap <= 0:
+                return 0.0
+            r = math.hypot(vxi - vxj, vyi - vyj)
+            t_rel = 2 * gap / (r + math.sqrt(r * r + 4 * decel * gap))
+            dt = min(dt, max(gap / combined, t_rel))
     return dt
 
 
@@ -360,6 +399,7 @@ def _resolve_contacts(balls, ids, sunk, first_contact, v_stop, paths=None):
     pocket mouth drops before it can bounce off the rail. Mutates balls, ids and sunk,
     and adds each ball whose velocity changes to paths (if given) at its current point.
     """
+    reach = D + CONTACT_TOL
     for _ in range(4 * len(balls) + 4):     # repeat for chains like a frozen rack
         _drop_pocketed(balls, ids, sunk, v_stop)
         n = len(balls)
@@ -379,6 +419,10 @@ def _resolve_contacts(balls, ids, sunk, first_contact, v_stop, paths=None):
             for j in range(i + 1, n):
                 xi, yi, vxi, vyi = balls[i]
                 xj, yj, vxj, vyj = balls[j]
+                if not (vxi or vyi or vxj or vyj):
+                    continue                    # two balls at rest can't collide
+                if abs(xj - xi) > reach or abs(yj - yi) > reach:
+                    continue                    # quick check: clearly not touching
                 if math.hypot(xj - xi, yj - yi) - D > CONTACT_TOL:
                     continue
                 vi, vj = resolve_collision((xi, yi), (vxi, vyi), (xj, yj), (vxj, vyj))

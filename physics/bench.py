@@ -3,10 +3,12 @@
     python -m physics.bench [--n N]
 
 Prints mean, p95 and max milliseconds per call for mid-game tables and for the
-full-power break. The set-up matches the speed check in tests/test_physics_perf.py
-(issue #8): seed 4710, 10 random tables of 8 balls, shots mostly aimed near an object
-ball, default params and record_paths=False, which is how the agent calls it. --n sets
-the number of mid-game shots and of break runs (default 250).
+full-power break. The speed check in tests/test_physics_perf.py (issue #8) uses the
+table and shot helpers below, so both time the same shots: seed 4710, 10 random tables
+of 8 balls, shots mostly aimed near an object ball, default params and
+record_paths=False, which is how the agent calls it. The physics tests also take their
+break rack from break_table() here. --n sets the number of mid-game shots and of break
+runs (default 250).
 
 This is a dev tool; it imports only core and physics.
 """

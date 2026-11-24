@@ -22,10 +22,10 @@ from physics.simulate import simulate_timeline
 
 FPS = 30
 PAD = 0.08              # m, rail width drawn around the playing surface
+CONTACT_TOL = 1e-5      # m, a cue this close to one ball-width away starts touching
 CLOTH = "#1f6b3a"
 RAIL = "#5b3a1e"
 # Standard pool colours for 1-7; stripes 9-15 use the same colour as id - 8.
-CONTACT_TOL = 1e-3      # m, slack when matching a cue path point to the first contact
 COLOURS = {1: "#f2c200", 2: "#1a4fd6", 3: "#d62020", 4: "#6a2c91", 5: "#f07800",
            6: "#138a36", 7: "#7a1f1f"}
 
@@ -45,16 +45,36 @@ def default_angle(state: TableState) -> float:
 def first_contact_point(result, start: dict):
     """Where the cue was when it first touched a ball, or None if it touched nothing.
 
-    Every other ball is still at rest until that hit, so it is the first point on the
-    cue's path one ball-width from the struck ball's start. (The path's second point
-    isn't always it: a kick shot bounces off a cushion first.)
+    Until that hit only the cue has moved, so the struck ball is still at its start and
+    the contact is the first place along the cue's path that is exactly one ball-width
+    (2 * BALL_R) from it. The path is straight between its points, so we walk it segment
+    by segment and solve for where each segment crosses that circle. If the cue starts
+    touching the ball, the contact is the cue's start.
     """
     if result.first_contact not in start or not result.paths or 0 not in result.paths:
         return None
     ox, oy = start[result.first_contact]
-    for x, y in result.paths[0][1:]:
-        if abs(math.hypot(x - ox, y - oy) - 2 * BALL_R) <= CONTACT_TOL:
-            return x, y
+    path = result.paths[0]
+    d = 2 * BALL_R
+    px, py = path[0]
+    if math.hypot(px - ox, py - oy) <= d + CONTACT_TOL:
+        return px, py
+    for (ax, ay), (bx, by) in zip(path, path[1:]):
+        # Solve |a + t*(b - a) - o| = d for the smallest t in [0, 1].
+        ux, uy = bx - ax, by - ay
+        fx, fy = ax - ox, ay - oy
+        a = ux * ux + uy * uy
+        if a == 0:
+            continue
+        b = 2 * (fx * ux + fy * uy)
+        c = fx * fx + fy * fy - d * d
+        disc = b * b - 4 * a * c
+        if disc < 0:
+            continue
+        t = (-b - math.sqrt(disc)) / (2 * a)
+        if -1e-9 <= t <= 1 + 1e-9:
+            t = min(max(t, 0.0), 1.0)
+            return ax + t * ux, ay + t * uy
     return None
 
 

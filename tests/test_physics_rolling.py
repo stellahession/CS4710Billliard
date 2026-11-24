@@ -5,7 +5,8 @@ Model expected (physics/simulate.py, constants from physics/params.py):
     v0 = power * params.V_MAX          cue-ball starting speed
     params.DECEL                       constant deceleration (m/s^2) opposite to velocity
     params.V_STOP                      a ball slower than this is at rest
-    params.MAX_TIME                    simulated-time guard; reaching it raises RuntimeError
+    params.MAX_TIME                    simulated-time guard; reaching it stops every ball
+                                       where it is and issues a RuntimeWarning
 
 So a lone ball that hits no cushion rolls v0^2 / (2 * DECEL) along the aim line and stops.
 Distances are worked out from params at test time, so tuning them in issue #10 won't
@@ -17,6 +18,10 @@ import pytest
 
 from core.state import BALL_R, TABLE_H, TABLE_W, Ball, Shot, TableState
 from tests.test_physics_simulate import break_table, load
+
+# The guard now warns instead of raising, so turn its warning into an error here: the
+# "never hits the guard" tests below must still fail if a normal shot trips it.
+pytestmark = pytest.mark.filterwarnings("error::RuntimeWarning")
 
 STOP_TOL = 1e-3     # m, the issue's "within 1 mm"
 
@@ -202,10 +207,13 @@ def test_stopped_lone_ball_is_exactly_where_friction_puts_it(simulate, params):
 
 # --- max-time guard --------------------------------------------------------------
 
-def test_max_time_guard_raises_when_reached(simulate, params, monkeypatch):
+def test_max_time_guard_warns_and_still_returns_a_result(simulate, params, monkeypatch):
+    # One odd shot must not stop the agent's search, so the guard warns instead of raising.
     monkeypatch.setattr(params, "MAX_TIME", 0.5)
-    with pytest.raises(RuntimeError, match="MAX_TIME"):
-        simulate(cue_at(0.3, 0.635), Shot(0.3, 1.0))
+    with pytest.warns(RuntimeWarning, match="MAX_TIME"):
+        result = simulate(cue_at(0.3, 0.635), Shot(0.3, 1.0))
+    x, y = final_cue(result)
+    assert 0.3 < x < TABLE_W and math.isfinite(y)
 
 
 def test_max_time_leaves_room_for_a_full_power_roll(params):
@@ -236,5 +244,5 @@ def test_full_power_lone_cue_with_many_bounces_never_hits_the_guard(simulate, pa
     (lambda: load("straight_shot.json"), 75),
 ])
 def test_full_power_shots_with_object_balls_never_hit_the_guard(simulate, make_state, deg):
-    # Default MAX_TIME; a RuntimeError here means a normal shot tripped the guard.
+    # Default MAX_TIME; a RuntimeWarning here means a normal shot tripped the guard.
     simulate(make_state(), Shot(math.radians(deg), 1.0))

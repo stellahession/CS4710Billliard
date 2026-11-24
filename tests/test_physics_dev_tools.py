@@ -518,3 +518,24 @@ def test_bench_rejects_a_non_integer_n():
     assert "No module named" not in proc.stderr, proc.stderr
     assert proc.returncode != 0
 
+
+
+def test_first_contact_point_when_the_cue_starts_touching_the_ball(simulate, demo):
+    state = TableState([Ball(0, 1.0, MID_Y), Ball(1, 1.0 + 2 * BALL_R, MID_Y)])
+    result = simulate(state, Shot(0.0, 0.3), record_paths=True)
+    assert result.first_contact == 1
+    assert demo.first_contact_point(result, live_starts(state)) == \
+        pytest.approx((1.0, MID_Y), abs=1e-9)
+
+
+def test_first_contact_point_ignores_a_bounce_near_one_ball_width_away(demo):
+    # A made-up path: the cue bounces at a point 2R + 0.5 mm from ball 1 (not touching),
+    # then rolls straight into it. The marker must be on the hit, not the bounce.
+    o = (1.0, 0.5)
+    bounce = (o[0] + 2 * BALL_R + 0.0005, o[1])
+    hit = (o[0], o[1] + 2 * BALL_R)
+    path = [(1.5, o[1]), bounce, (1.3, 0.8), (o[0], 0.8), hit]
+    result = ShotResult(final=TableState([]), pocketed=[], first_contact=1,
+                        scratch=False, paths={0: path})
+    point = demo.first_contact_point(result, {1: o})
+    assert point == pytest.approx(hit, abs=1e-9)

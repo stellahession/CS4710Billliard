@@ -4,7 +4,9 @@ The agent calls simulate() about 1,100 times per recommendation, so:
 
   - Mid-game: on tables of about 8 balls, over 200+ varied shots, the mean time per call
     is at most 10 ms and the p99 at most 20 ms. Most agent calls look like this.
-  - Full-power break: the 16-ball break is timed and printed, but never fails the test.
+  - Full-power break: the 16-ball break, the worst case, has a mean of at most
+    BREAK_MEAN_MAX_MS. That is CLAUDE.md's "about 20 ms" plus some slack for slower
+    laptops (it measures about 18 ms on Todd's).
 
 The timing tests are marked @pytest.mark.slow. The `slow` marker is registered in
 pyproject.toml and deselected by default, so a plain `pytest` stays fast and
@@ -13,25 +15,21 @@ can be posted for Nik and Stella.
 
 Timings use the default params and record_paths=False, which is how the agent calls it.
 """
-import math
-import random
 import statistics
 import time
 
 import pytest
 
-from core.state import BALL_R, TABLE_H, TABLE_W, Ball, Shot, TableState
-from tests.test_physics_simulate import break_table
+from core.state import Shot
+from physics import bench
+from physics.bench import BALLS_PER_TABLE, N_TABLES, break_table
 
-D = 2 * BALL_R
-SEED = 4710
-N_TABLES = 10
 SHOTS_PER_TABLE = 25            # 250 shots in total
-BALLS_PER_TABLE = 8             # cue + 7 object balls
 MEAN_MAX_MS = 10.0
 P99_MAX_MS = 20.0
 CALLS_PER_RECOMMENDATION = 1100
 BREAK_RUNS = 20
+BREAK_MEAN_MAX_MS = 25.0
 
 
 @pytest.fixture
@@ -43,36 +41,9 @@ def simulate():
 
 # --- helpers -----------------------------------------------------------------------
 
-def mid_game_table(rng: random.Random) -> TableState:
-    """Cue plus 7 random object balls, kept off the cushions and clear of each other."""
-    ids = [0] + rng.sample([i for i in range(1, 16)], BALLS_PER_TABLE - 1)
-    margin = BALL_R + 0.05
-    placed: list[tuple[float, float]] = []
-    while len(placed) < BALLS_PER_TABLE:
-        p = (rng.uniform(margin, TABLE_W - margin), rng.uniform(margin, TABLE_H - margin))
-        if all(math.dist(p, q) > D + 0.01 for q in placed):
-            placed.append(p)
-    return TableState([Ball(bid, x, y) for bid, (x, y) in zip(ids, placed)], "open")
-
-
-def varied_shot(rng: random.Random, state: TableState) -> Shot:
-    """Mostly aimed near a random object ball, like the agent's shots; some aimed anywhere."""
-    cue = state.balls[0]
-    if rng.random() < 0.8:
-        target = rng.choice(state.balls[1:])
-        angle = math.atan2(target.y - cue.y, target.x - cue.x) + rng.uniform(-0.05, 0.05)
-    else:
-        angle = rng.uniform(-math.pi, math.pi)
-    return Shot(angle, rng.uniform(0.1, 1.0))
-
-
-def mid_game_cases() -> list[tuple[TableState, Shot]]:
-    rng = random.Random(SEED)
-    cases = []
-    for _ in range(N_TABLES):
-        state = mid_game_table(rng)
-        cases += [(state, varied_shot(rng, state)) for _ in range(SHOTS_PER_TABLE)]
-    return cases
+def mid_game_cases():
+    """The same 250 shots that python -m physics.bench times by default."""
+    return bench.mid_game_cases(N_TABLES * SHOTS_PER_TABLE)
 
 
 def time_ms(simulate, state, shot) -> float:
@@ -130,10 +101,11 @@ def test_mid_game_mean_and_p99_are_fast_enough(simulate, capsys):
 
 
 @pytest.mark.slow
-def test_full_power_break_is_timed(simulate, capsys):
+def test_full_power_break_is_fast_enough(simulate, capsys):
     state, shot = break_table(), Shot(0.0, 1.0)
     simulate(state, shot)                                # warm up
     times = [time_ms(simulate, state, shot) for _ in range(BREAK_RUNS)]
+    mean = statistics.fmean(times)
     report(capsys, f"full-power break (16 balls, {BREAK_RUNS} runs): "
-                   f"mean {statistics.fmean(times):.2f} ms, max {max(times):.2f} ms")
-    # Measured and printed only; a slow break doesn't fail the test.
+                   f"mean {mean:.2f} ms, max {max(times):.2f} ms")
+    assert mean <= BREAK_MEAN_MAX_MS, f"break mean {mean:.2f} ms is over {BREAK_MEAN_MAX_MS} ms"

@@ -20,6 +20,7 @@ from pathlib import Path
 import pytest
 
 from core.state import BALL_R, TABLE_H, TABLE_W, Ball, Shot, ShotResult, TableState
+from physics.bench import break_table  # noqa: F401  (other test files import it from here)
 
 FIXTURES = Path(__file__).parent / "fixtures"
 PARAM_NAMES = ["V_MAX", "DECEL", "E_BALL", "E_CUSHION", "POCKET_R", "V_STOP", "MAX_TIME"]
@@ -55,18 +56,6 @@ def with_pocketed_ball_in_the_way() -> TableState:
     """Ball 3 is already pocketed but its stale coordinates sit on the cue's line to ball 5."""
     return TableState([Ball(0, 0.5, 0.635), Ball(3, 1.0, 0.635, pocketed=True),
                        Ball(5, 1.5, 0.635)], "solids")
-
-
-def break_table() -> TableState:
-    """Cue on the head string, tight 15-ball rack with the apex on the foot spot."""
-    balls = [Ball(0, TABLE_W / 4, TABLE_H / 2)]
-    ids = iter([1, 9, 2, 10, 8, 3, 11, 4, 12, 5, 13, 6, 14, 7, 15])
-    for row in range(5):
-        for k in range(row + 1):
-            x = 3 * TABLE_W / 4 + row * (2 * BALL_R * math.sqrt(3) / 2 + 1e-4)
-            y = TABLE_H / 2 + (k - row / 2) * (2 * BALL_R + 1e-4)
-            balls.append(Ball(next(ids), x, y))
-    return TableState(balls)
 
 
 def assert_all_finite(result: ShotResult):
@@ -319,3 +308,50 @@ def test_monkeypatching_decel_changes_how_far_the_cue_rolls(simulate, params, mo
     monkeypatch.setattr(params, "DECEL", params.DECEL * 2)
     shorter = ball(simulate(state, shot).final, 0).x
     assert 0.5 < shorter < normal
+
+
+# --- regressions from the physics-mvp review ---------------------------------------
+
+@pytest.mark.filterwarnings("error::RuntimeWarning")
+@pytest.mark.parametrize("gap", [5e-5, 2e-5, 1e-3])
+def test_balls_rolling_side_by_side_settle_without_tiny_steps(params, monkeypatch, gap):
+    # Two balls rolling the same way just apart never get closer. The step size must
+    # not shrink to gap / speed, or the shot runs out of steps. A shot can't start two
+    # balls moving together, so this drives the stepping loop directly.
+    import physics.simulate as sim
+    monkeypatch.setattr(sim, "MAX_STEPS", 2_000)
+    v, y0 = 0.5, 0.4                      # rolls about 1.3 m, clear of the cushions
+    balls = [(0.5, y0, v, 0.0), (0.5, y0 + 2 * BALL_R + gap, v, 0.0)]
+    sim._run(balls, [0, 1], [])
+    roll = v * v / (2 * params.DECEL)
+    assert balls[0][0] == pytest.approx(0.5 + roll, abs=1e-6)
+    assert balls[1][0] == pytest.approx(0.5 + roll, abs=1e-6)
+
+
+def test_max_steps_guard_warns_and_still_returns_a_result(simulate, monkeypatch):
+    import physics.simulate as sim
+    monkeypatch.setattr(sim, "MAX_STEPS", 3)
+    with pytest.warns(RuntimeWarning, match="steps"):
+        result = simulate(break_table(), Shot(0.0, 1.0))
+    assert isinstance(result, ShotResult)
+    assert_all_finite(result)
+
+
+def test_pocketed_ball_coordinates_are_floats(simulate):
+    # POCKETS mixes ints and floats; the final table must not.
+    state = TableState([Ball(0, 0.5, BALL_R + 0.001)])
+    result = simulate(state, Shot(math.pi, 0.5))
+    cue = ball(result.final, 0)
+    assert cue.pocketed
+    assert isinstance(cue.x, float) and isinstance(cue.y, float)
+
+
+@pytest.mark.filterwarnings("error::RuntimeWarning")
+@pytest.mark.parametrize("corner", [(0.0, 0.0), (TABLE_W, TABLE_H), (0.0, TABLE_H)])
+def test_balls_piled_into_a_corner_are_pushed_fully_apart(simulate, corner):
+    # Clamping to the cushions used to undo the push, leaving clustered balls overlapping.
+    state = TableState([Ball(bid, *corner) for bid in range(6)])
+    final = simulate(state, Shot(0.0, 0.0)).final.balls
+    for i, a in enumerate(final):
+        for b in final[i + 1:]:
+            assert math.hypot(a.x - b.x, a.y - b.y) >= 2 * BALL_R - 1e-12, (a.id, b.id)
